@@ -24,13 +24,7 @@ python3 -m py_compile fuse_posix_tracer.py
 python3 -m unittest discover -s tests -v
 ```
 
-预期在非 Linux 环境下：
-
-```text
-OK (skipped=2)
-```
-
-其中 Linux/BCC 集成测试会被跳过。
+在非 Linux、非 root 或缺少 BCC 的环境下，Linux/BCC 集成测试会被跳过，只运行纯 Python 单元测试。
 
 ## 2. 运行依赖
 
@@ -47,6 +41,8 @@ BCC / iovisor bcc Python 绑定
 ```
 
 macOS / Darwin 不能运行 eBPF/BCC 追踪功能，只能跑纯 Python 单元测试。
+
+注意：BCC Python 绑定需要安装到实际运行脚本的 Python 解释器可见的位置。如果使用 venv/conda，系统包 `python3-bpfcc` 可能不会被该解释器自动找到。
 
 ### 2.2 Ubuntu / Debian 依赖安装示例
 
@@ -128,7 +124,6 @@ tar -czf fuse-posix-tracer.tar.gz \
 
 ```bash
 tar -xzf fuse-posix-tracer.tar.gz
-cd posix_ebpf
 ```
 
 运行测试：
@@ -165,6 +160,8 @@ sudo python3 fuse_posix_tracer.py -d /mnt/objstore
 - 输出到 stdout。
 - 一直运行，直到 Ctrl-C。
 
+注意：目标目录路径会写入 BPF 程序用于内核侧前缀匹配，UTF-8 编码长度必须小于 256 bytes。若 `--dir` 指向符号链接，匹配使用用户传入路径的绝对路径，日志 header 中的 `target_dir_realpath` 仅用于辅助识别真实目录。
+
 ### 4.2 追踪 60 秒并写入文件
 
 ```bash
@@ -173,6 +170,8 @@ sudo python3 fuse_posix_tracer.py \
   -o trace.log \
   -t 60
 ```
+
+输出文件以 append 模式打开，多次运行会追加到同一个日志文件。
 
 ### 4.3 写文件同时打印到 stdout
 
@@ -189,7 +188,7 @@ sudo python3 fuse_posix_tracer.py \
 默认事件行类似：
 
 ```text
-[12:01:03.123456 pid=1234 comm=python3 latency=34us matched=path] getxattr("/mnt/objstore/archive/data.tar", name="security.selinux", size=255) = -1 (errno=95)
+[12:01:03.123456 pid=1234 comm=python3 latency=34us matched=path] getxattr('/mnt/objstore/archive/data.tar', size=255) = -1 (errno=95)
 ```
 
 使用 `--compact` 后，事件行去掉前缀：
@@ -205,7 +204,7 @@ sudo python3 fuse_posix_tracer.py \
 输出类似：
 
 ```text
-getxattr("/mnt/objstore/archive/data.tar", name="security.selinux", size=255) = -1 (errno=95)
+getxattr('/mnt/objstore/archive/data.tar', size=255) = -1 (errno=95)
 ```
 
 ## 5. 推荐 smoke test
