@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import os
 import platform
 import signal
@@ -135,6 +136,30 @@ class TraceEvent:
     ret: int
     errno: int | None
     args_text: str
+
+
+class PerfEventRecord(ctypes.Structure):
+    _fields_ = [
+        ("timestamp_ns", ctypes.c_uint64),
+        ("pid", ctypes.c_uint32),
+        ("tid", ctypes.c_uint32),
+        ("comm", ctypes.c_char * 16),
+        ("syscall_id", ctypes.c_uint32),
+        ("matched_mask", ctypes.c_uint32),
+        ("latency_ns", ctypes.c_uint64),
+        ("ret", ctypes.c_int64),
+        ("errno_value", ctypes.c_int),
+        ("fd", ctypes.c_int),
+        ("dirfd", ctypes.c_int),
+        ("flags", ctypes.c_uint64),
+        ("mode", ctypes.c_uint64),
+        ("size", ctypes.c_uint64),
+        ("offset", ctypes.c_int64),
+        ("request", ctypes.c_uint64),
+        ("path1", ctypes.c_char * MAX_BPF_PATH_LEN),
+        ("path2", ctypes.c_char * MAX_BPF_PATH_LEN),
+        ("xattr_name", ctypes.c_char * 64),
+    ]
 
 
 def format_latency(latency_ns: int) -> str:
@@ -785,9 +810,9 @@ class TracerRuntime:
 
     def _handle_event(self, cpu, data, size) -> None:
         del cpu, size
-        if self._events_table is None or self._writer is None:
+        if self._writer is None:
             return
-        record = self._events_table.event(data)
+        record = ctypes.cast(data, ctypes.POINTER(PerfEventRecord)).contents
         event = self._trace_event_from_record(record)
         self.summary.record_event(event)
         self._writer.write_line(format_event_line(event, compact=self.config.compact))
