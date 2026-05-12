@@ -51,6 +51,26 @@ class SyscallCatalogTest(unittest.TestCase):
             with self.subTest(part=part):
                 self.assertIn(part, source)
 
+    def test_each_business_syscall_has_path_or_fd_match_input(self):
+        for syscall in sorted(tracer.BUSINESS_SYSCALLS):
+            with self.subTest(syscall=syscall):
+                path1_idx, path2_idx, fd_idx = tracer._syscall_profile(syscall)[:3]
+                self.assertTrue(
+                    path1_idx >= 0 or path2_idx >= 0 or fd_idx >= 0,
+                    msg=f"{syscall} cannot match target path or tracked fd",
+                )
+
+    def test_profiles_cover_path_syscalls_that_are_easy_to_miss(self):
+        expected = {
+            "lchown": (0, -1, -1),
+            "utime": (0, -1, -1),
+            "utimes": (0, -1, -1),
+            "symlinkat": (0, 2, -1),
+        }
+        for syscall, expected_prefix in expected.items():
+            with self.subTest(syscall=syscall):
+                self.assertEqual(tracer._syscall_profile(syscall)[:3], expected_prefix)
+
 
 if __name__ == "__main__":
     unittest.main()

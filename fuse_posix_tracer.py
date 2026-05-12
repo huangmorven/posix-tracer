@@ -232,17 +232,11 @@ def _escape_c_string(value: str) -> str:
 
 def _syscall_profile(syscall: str) -> tuple[int, int, int, int, int, int, int, int, int]:
     no_arg = -1
-    xattr_path0 = {
-        "getxattr", "lgetxattr", "setxattr", "lsetxattr", "listxattr",
-        "llistxattr", "removexattr", "lremovexattr",
-    }
-    xattr_fd = {"fgetxattr", "fsetxattr", "flistxattr", "fremovexattr"}
-
     if syscall == "open":
         return (0, no_arg, no_arg, 1, 2, no_arg, no_arg, no_arg, no_arg)
     if syscall == "creat":
         return (0, no_arg, no_arg, no_arg, 1, no_arg, no_arg, no_arg, no_arg)
-    if syscall in {"stat", "lstat", "access", "rmdir", "unlink", "chown"}:
+    if syscall in {"stat", "lstat", "access", "rmdir", "unlink", "chown", "lchown", "utime", "utimes"}:
         return (0, no_arg, no_arg, no_arg, no_arg, no_arg, no_arg, no_arg, no_arg)
     if syscall in {"chmod", "mkdir"}:
         return (0, no_arg, no_arg, no_arg, 1, no_arg, no_arg, no_arg, no_arg)
@@ -258,14 +252,18 @@ def _syscall_profile(syscall: str) -> tuple[int, int, int, int, int, int, int, i
         return (1, no_arg, no_arg, 3, no_arg, no_arg, no_arg, no_arg, 0)
     if syscall == "statx":
         return (1, no_arg, no_arg, 2, no_arg, no_arg, no_arg, 3, 0)
-    if syscall in {"faccessat", "faccessat2"}:
+    if syscall == "faccessat":
+        return (1, no_arg, no_arg, no_arg, 2, no_arg, no_arg, no_arg, 0)
+    if syscall == "faccessat2":
         return (1, no_arg, no_arg, 3, 2, no_arg, no_arg, no_arg, 0)
     if syscall == "fchmodat":
-        return (1, no_arg, no_arg, 3, 2, no_arg, no_arg, no_arg, 0)
+        return (1, no_arg, no_arg, no_arg, 2, no_arg, no_arg, no_arg, 0)
     if syscall == "fchownat":
         return (1, no_arg, no_arg, 4, no_arg, no_arg, no_arg, no_arg, 0)
-    if syscall in {"utimensat", "futimesat"}:
+    if syscall == "utimensat":
         return (1, no_arg, no_arg, 3, no_arg, no_arg, no_arg, no_arg, 0)
+    if syscall == "futimesat":
+        return (1, no_arg, no_arg, no_arg, no_arg, no_arg, no_arg, no_arg, 0)
     if syscall == "readlinkat":
         return (1, no_arg, no_arg, no_arg, no_arg, 3, no_arg, no_arg, 0)
     if syscall == "mkdirat":
@@ -274,10 +272,22 @@ def _syscall_profile(syscall: str) -> tuple[int, int, int, int, int, int, int, i
         return (1, no_arg, no_arg, 2, no_arg, no_arg, no_arg, no_arg, 0)
     if syscall == "name_to_handle_at":
         return (1, no_arg, no_arg, 4, no_arg, no_arg, no_arg, no_arg, 0)
-    if syscall in xattr_path0:
+    if syscall in {"getxattr", "lgetxattr"}:
+        return (0, no_arg, no_arg, no_arg, no_arg, 3, no_arg, no_arg, no_arg)
+    if syscall in {"setxattr", "lsetxattr"}:
         return (0, no_arg, no_arg, 4, no_arg, 3, no_arg, no_arg, no_arg)
-    if syscall in xattr_fd:
+    if syscall in {"listxattr", "llistxattr"}:
+        return (0, no_arg, no_arg, no_arg, no_arg, 2, no_arg, no_arg, no_arg)
+    if syscall in {"removexattr", "lremovexattr"}:
+        return (0, no_arg, no_arg, no_arg, no_arg, no_arg, no_arg, no_arg, no_arg)
+    if syscall == "fgetxattr":
+        return (no_arg, no_arg, 0, no_arg, no_arg, 3, no_arg, no_arg, no_arg)
+    if syscall == "fsetxattr":
         return (no_arg, no_arg, 0, 4, no_arg, 3, no_arg, no_arg, no_arg)
+    if syscall == "flistxattr":
+        return (no_arg, no_arg, 0, no_arg, no_arg, 2, no_arg, no_arg, no_arg)
+    if syscall == "fremovexattr":
+        return (no_arg, no_arg, 0, no_arg, no_arg, no_arg, no_arg, no_arg, no_arg)
     if syscall in {"fstat", "fsync", "fdatasync", "syncfs", "close", "dup"}:
         return (no_arg, no_arg, 0, no_arg, no_arg, no_arg, no_arg, no_arg, no_arg)
     if syscall in {"fchmod", "flock", "fcntl"}:
@@ -296,12 +306,14 @@ def _syscall_profile(syscall: str) -> tuple[int, int, int, int, int, int, int, i
         return (no_arg, no_arg, 0, no_arg, 1, 3, 2, no_arg, no_arg)
     if syscall in {"rename", "link", "symlink"}:
         return (0, 1, no_arg, no_arg, no_arg, no_arg, no_arg, no_arg, no_arg)
+    if syscall == "symlinkat":
+        return (0, 2, no_arg, no_arg, no_arg, no_arg, no_arg, no_arg, 1)
     if syscall == "renameat2":
         return (1, 3, no_arg, 4, no_arg, no_arg, no_arg, no_arg, 0)
     if syscall in {"renameat", "linkat"}:
         return (1, 3, no_arg, no_arg, no_arg, no_arg, no_arg, no_arg, 0)
     if syscall in {"dup2", "dup3"}:
-        return (no_arg, no_arg, 0, 2, no_arg, no_arg, no_arg, no_arg, no_arg)
+        return (no_arg, no_arg, 0, no_arg, no_arg, no_arg, no_arg, no_arg, no_arg)
     if syscall == "close_range":
         return (no_arg, no_arg, 0, 1, no_arg, no_arg, no_arg, no_arg, no_arg)
     return (no_arg, no_arg, no_arg, no_arg, no_arg, no_arg, no_arg, no_arg, no_arg)
@@ -338,9 +350,6 @@ def build_bpf_source(target_dir: str, enabled_syscalls: list[str]) -> str:
         )
     probes = "\n".join(probe_functions)
     return f"""
-#include <uapi/linux/ptrace.h>
-#include <linux/sched.h>
-
 #define MAX_PATH_LEN 256
 #define MAX_XATTR_NAME_LEN 64
 #define TARGET_DIR \"{escaped_target}\"
@@ -413,6 +422,9 @@ struct event_t {{
 
 BPF_HASH(entry_map, u64, struct entry_t, 16384);
 BPF_HASH(fd_map, struct fd_key_t, struct fd_value_t, 65536);
+BPF_PERCPU_ARRAY(entry_heap, struct entry_t, 1);
+BPF_PERCPU_ARRAY(event_heap, struct event_t, 1);
+BPF_PERCPU_ARRAY(fd_value_heap, struct fd_value_t, 1);
 BPF_PERF_OUTPUT(events);
 
 static __always_inline int path_matches(char *path) {{
@@ -459,48 +471,53 @@ static __always_inline int handle_enter(
 ) {{
     u64 pid_tgid = bpf_get_current_pid_tgid();
     u32 tgid = pid_tgid >> 32;
-    struct entry_t entry = {{}};
-    entry.start_ns = bpf_ktime_get_ns();
-    entry.syscall_id = syscall_id;
-    entry.fd = -1;
-    entry.dirfd = -1;
+    u32 zero = 0;
+    struct entry_t *entry = entry_heap.lookup(&zero);
+    if (!entry) {{
+        return 0;
+    }}
+    __builtin_memset(entry, 0, sizeof(*entry));
+    entry->start_ns = bpf_ktime_get_ns();
+    entry->syscall_id = syscall_id;
+    entry->fd = -1;
+    entry->dirfd = -1;
     if (fd_idx >= 0) {{
-        entry.fd = (int)ctx->args[fd_idx];
+        entry->fd = (int)ctx->args[fd_idx];
     }}
     if (dirfd_idx >= 0) {{
-        entry.dirfd = (int)ctx->args[dirfd_idx];
+        entry->dirfd = (int)ctx->args[dirfd_idx];
     }}
     if (flags_idx >= 0) {{
-        entry.flags = ctx->args[flags_idx];
+        entry->flags = ctx->args[flags_idx];
     }}
     if (mode_idx >= 0) {{
-        entry.mode = ctx->args[mode_idx];
+        entry->mode = ctx->args[mode_idx];
     }}
     if (size_idx >= 0) {{
-        entry.size = ctx->args[size_idx];
+        entry->size = ctx->args[size_idx];
     }}
     if (offset_idx >= 0) {{
-        entry.offset = (s64)ctx->args[offset_idx];
+        entry->offset = (s64)ctx->args[offset_idx];
     }}
     if (request_idx >= 0) {{
-        entry.request = ctx->args[request_idx];
+        entry->request = ctx->args[request_idx];
     }}
     if (path1_idx >= 0) {{
-        bpf_probe_read_user_str(&entry.path1, sizeof(entry.path1), (void *)ctx->args[path1_idx]);
-        if (path_matches(entry.path1)) {{
-            entry.matched_mask |= 1;
+        bpf_probe_read_str(&entry->path1, sizeof(entry->path1), (void *)ctx->args[path1_idx]);
+        if (path_matches(entry->path1)) {{
+            entry->matched_mask |= 1;
         }}
     }}
     if (path2_idx >= 0) {{
-        bpf_probe_read_user_str(&entry.path2, sizeof(entry.path2), (void *)ctx->args[path2_idx]);
-        if (path_matches(entry.path2)) {{
-            entry.matched_mask |= 2;
+        bpf_probe_read_str(&entry->path2, sizeof(entry->path2), (void *)ctx->args[path2_idx]);
+        if (path_matches(entry->path2)) {{
+            entry->matched_mask |= 2;
         }}
     }}
     if (fd_idx >= 0 && path1_idx < 0) {{
-        copy_fd_path(tgid, entry.fd, &entry);
+        copy_fd_path(tgid, entry->fd, entry);
     }}
-    entry_map.update(&pid_tgid, &entry);
+    entry_map.update(&pid_tgid, entry);
     return 0;
 }}
 
@@ -508,12 +525,17 @@ static __always_inline void update_open_fd(u32 tgid, int fd, struct entry_t *ent
     if (fd < 0 || !(entry->matched_mask & 1)) {{
         return;
     }}
+    u32 zero = 0;
     struct fd_key_t key = {{}};
-    struct fd_value_t value = {{}};
+    struct fd_value_t *value = fd_value_heap.lookup(&zero);
+    if (!value) {{
+        return;
+    }}
+    __builtin_memset(value, 0, sizeof(*value));
     key.tgid = tgid;
     key.fd = fd;
-    __builtin_memcpy(value.path, entry->path1, sizeof(value.path));
-    fd_map.update(&key, &value);
+    __builtin_memcpy(value->path, entry->path1, sizeof(value->path));
+    fd_map.update(&key, value);
 }}
 
 static __always_inline void delete_fd(u32 tgid, int fd) {{
@@ -531,12 +553,17 @@ static __always_inline void duplicate_fd(u32 tgid, int old_fd, int new_fd) {{
     if (!old_value || new_fd < 0) {{
         return;
     }}
+    u32 zero = 0;
     struct fd_key_t new_key = {{}};
-    struct fd_value_t new_value = {{}};
+    struct fd_value_t *new_value = fd_value_heap.lookup(&zero);
+    if (!new_value) {{
+        return;
+    }}
+    __builtin_memset(new_value, 0, sizeof(*new_value));
     new_key.tgid = tgid;
     new_key.fd = new_fd;
-    __builtin_memcpy(new_value.path, old_value->path, sizeof(new_value.path));
-    fd_map.update(&new_key, &new_value);
+    __builtin_memcpy(new_value->path, old_value->path, sizeof(new_value->path));
+    fd_map.update(&new_key, new_value);
 }}
 
 static __always_inline int handle_exit(
@@ -564,9 +591,9 @@ static __always_inline int handle_exit(
         int last = (int)entry->flags;
 #pragma unroll
         for (int i = 0; i < 256; i++) {{
-            int current = first + i;
-            if (current <= last) {{
-                delete_fd(tgid, current);
+            int fd_current = first + i;
+            if (fd_current <= last) {{
+                delete_fd(tgid, fd_current);
             }}
         }}
     }} else if (ret >= 0 && maintenance_kind == 3) {{
@@ -577,26 +604,32 @@ static __always_inline int handle_exit(
         }}
     }}
     if (is_business && entry->matched_mask) {{
-        struct event_t event = {{}};
-        event.timestamp_ns = bpf_ktime_get_ns();
-        event.pid = tgid;
-        event.tid = tid;
-        event.syscall_id = syscall_id;
-        event.matched_mask = entry->matched_mask;
-        event.latency_ns = event.timestamp_ns - entry->start_ns;
-        event.ret = ret;
-        event.errno_value = ret < 0 ? (int)(-ret) : 0;
-        event.fd = entry->fd;
-        event.dirfd = entry->dirfd;
-        event.flags = entry->flags;
-        event.mode = entry->mode;
-        event.size = entry->size;
-        event.offset = entry->offset;
-        event.request = entry->request;
-        __builtin_memcpy(event.path1, entry->path1, sizeof(event.path1));
-        __builtin_memcpy(event.path2, entry->path2, sizeof(event.path2));
-        bpf_get_current_comm(&event.comm, sizeof(event.comm));
-        events.perf_submit(ctx, &event, sizeof(event));
+        u32 zero = 0;
+        struct event_t *event = event_heap.lookup(&zero);
+        if (!event) {{
+            entry_map.delete(&pid_tgid);
+            return 0;
+        }}
+        __builtin_memset(event, 0, sizeof(*event));
+        event->timestamp_ns = bpf_ktime_get_ns();
+        event->pid = tgid;
+        event->tid = tid;
+        event->syscall_id = syscall_id;
+        event->matched_mask = entry->matched_mask;
+        event->latency_ns = event->timestamp_ns - entry->start_ns;
+        event->ret = ret;
+        event->errno_value = ret < 0 ? (int)(-ret) : 0;
+        event->fd = entry->fd;
+        event->dirfd = entry->dirfd;
+        event->flags = entry->flags;
+        event->mode = entry->mode;
+        event->size = entry->size;
+        event->offset = entry->offset;
+        event->request = entry->request;
+        __builtin_memcpy(event->path1, entry->path1, sizeof(event->path1));
+        __builtin_memcpy(event->path2, entry->path2, sizeof(event->path2));
+        bpf_get_current_comm(&event->comm, sizeof(event->comm));
+        events.perf_submit(ctx, event, sizeof(*event));
     }}
     entry_map.delete(&pid_tgid);
     return 0;
