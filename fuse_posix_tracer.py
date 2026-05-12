@@ -1,0 +1,848 @@
+#!/usr/bin/env python3
+"""fuse-posix-tracer: trace POSIX metadata/control syscalls under a target path."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import platform
+import signal
+import sys
+import time
+from collections import Counter
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+class UserError(Exception):
+    """Raised for user-facing input or environment errors."""
+
+
+class TracerRuntimeError(Exception):
+    """Raised for tracer runtime failures."""
+
+
+SYSCALL_GROUPS: dict[str, set[str]] = {
+    "path_open": {"open", "openat", "openat2", "creat", "name_to_handle_at"},
+    "metadata_read": {"stat", "lstat", "fstat", "newfstatat", "fstatat", "statx", "access", "faccessat", "faccessat2", "readlink", "readlinkat"},
+    "metadata_write": {"chmod", "fchmod", "fchmodat", "chown", "fchown", "lchown", "fchownat", "utime", "utimes", "utimensat", "futimesat", "truncate", "ftruncate"},
+    "directory": {"mkdir", "mkdirat", "rmdir", "getdents", "getdents64"},
+    "link_rename_delete": {"link", "linkat", "symlink", "symlinkat", "unlink", "unlinkat", "rename", "renameat", "renameat2"},
+    "fd_control": {"fcntl", "ioctl", "flock", "fsync", "fdatasync", "syncfs", "lseek"},
+    "xattr": {"getxattr", "lgetxattr", "fgetxattr", "setxattr", "lsetxattr", "fsetxattr", "listxattr", "llistxattr", "flistxattr", "removexattr", "lremovexattr", "fremovexattr"},
+    "space_control": {"fallocate"},
+}
+
+BUSINESS_SYSCALLS: set[str] = set().union(*SYSCALL_GROUPS.values())
+FD_MAINTENANCE_SYSCALLS: set[str] = {"close", "close_range", "dup", "dup2", "dup3", "fcntl"}
+FD_PRODUCER_SYSCALLS: set[str] = {"open", "openat", "openat2", "creat"}
+MAX_BPF_PATH_LEN = 256
+
+
+@dataclass(frozen=True)
+class TracerConfig:
+    target_dir: str
+    target_dir_realpath: str
+    output_path: str | None
+    duration_sec: float | None
+    follow: bool
+    compact: bool
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="fuse_posix_tracer.py")
+    parser.add_argument("-d", "--dir", dest="target_dir", required=True)
+    parser.add_argument("-o", "--output", dest="output_path")
+    parser.add_argument("-t", "--duration", dest="duration_sec", type=float)
+    parser.add_argument("--follow", action="store_true")
+    parser.add_argument("--compact", action="store_true")
+    return parser.parse_args(argv)
+
+
+def build_config(args: argparse.Namespace) -> TracerConfig:
+    target = Path(args.target_dir).expanduser()
+    if not target.exists():
+        raise UserError(f"target directory does not exist: {args.target_dir}")
+    if not target.is_dir():
+        raise UserError(f"target path is not a directory: {args.target_dir}")
+    normalized = normalize_target_dir(str(target.absolute()))
+    if len(normalized.encode("utf-8")) >= MAX_BPF_PATH_LEN:
+        raise UserError(f"target directory path is too long for BPF capture: {normalized}")
+    realpath = str(target.resolve())
+    return TracerConfig(
+        target_dir=normalized,
+        target_dir_realpath=realpath,
+        output_path=args.output_path,
+        duration_sec=args.duration_sec,
+        follow=args.follow,
+        compact=args.compact,
+    )
+
+
+def normalize_target_dir(path: str) -> str:
+    normalized = os.path.normpath(path)
+    if normalized == ".":
+        return normalized
+    return normalized.rstrip("/") or "/"
+
+
+def is_path_under_target(path: str, target_dir: str) -> bool:
+    normalized_path = os.path.normpath(path)
+    normalized_target = normalize_target_dir(target_dir)
+    if normalized_path == normalized_target:
+        return True
+    if normalized_target == "/":
+        return normalized_path.startswith("/")
+    return normalized_path.startswith(normalized_target + "/")
+
+
+class FdTable:
+    def __init__(self) -> None:
+        self._entries: dict[tuple[int, int], str] = {}
+
+    def open(self, pid: int, fd: int, path: str) -> None:
+        self._entries[(pid, fd)] = path
+
+    def close(self, pid: int, fd: int) -> None:
+        self._entries.pop((pid, fd), None)
+
+    def close_range(self, pid: int, first: int, last: int) -> None:
+        keys_to_remove = [
+            key for key in self._entries if key[0] == pid and first <= key[1] <= last
+        ]
+        for key in keys_to_remove:
+            self._entries.pop(key, None)
+
+    def dup(self, pid: int, old_fd: int, new_fd: int) -> None:
+        path = self.resolve(pid, old_fd)
+        if path is not None:
+            self.open(pid, new_fd, path)
+
+    def resolve(self, pid: int, fd: int) -> str | None:
+        return self._entries.get((pid, fd))
+
+
+@dataclass(frozen=True)
+class TraceEvent:
+    timestamp_ns: int
+    pid: int
+    tid: int
+    comm: str
+    syscall: str
+    matched: str
+    latency_ns: int
+    ret: int
+    errno: int | None
+    args_text: str
+
+
+def format_latency(latency_ns: int) -> str:
+    return f"{max(0, latency_ns) // 1000}us"
+
+
+def _format_time(timestamp_ns: int) -> str:
+    seconds = timestamp_ns / 1_000_000_000
+    return datetime.fromtimestamp(seconds).strftime("%H:%M:%S.%f")
+
+
+def format_event_line(event: TraceEvent, compact: bool = False) -> str:
+    result = f"{event.syscall}({event.args_text}) = {event.ret}"
+    if event.ret < 0 and event.errno is not None:
+        result += f" (errno={event.errno})"
+    if compact:
+        return result
+    prefix = (
+        f"[{_format_time(event.timestamp_ns)} pid={event.pid} comm={event.comm} "
+        f"latency={format_latency(event.latency_ns)} matched={event.matched}]"
+    )
+    return f"{prefix} {result}"
+
+
+@dataclass
+class Summary:
+    total_events: int = 0
+    failed_events: int = 0
+    lost_events: int = 0
+    syscall_counts: Counter[str] = None  # type: ignore[assignment]
+    errno_counts: Counter[int] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.syscall_counts is None:
+            self.syscall_counts = Counter()
+        if self.errno_counts is None:
+            self.errno_counts = Counter()
+
+    def record_event(self, event: TraceEvent) -> None:
+        self.total_events += 1
+        self.syscall_counts[event.syscall] += 1
+        if event.ret < 0:
+            self.failed_events += 1
+            if event.errno is not None:
+                self.errno_counts[event.errno] += 1
+
+    def record_lost(self, count: int) -> None:
+        self.lost_events += max(0, count)
+
+
+def format_header(
+    config: TracerConfig,
+    kernel: str,
+    bcc_version: str,
+    skipped_syscalls: list[str],
+) -> str:
+    skipped = ",".join(skipped_syscalls) if skipped_syscalls else "none"
+    compact = "true" if config.compact else "false"
+    started_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    lines = [
+        f"# fuse-posix-tracer started_at={started_at}",
+        f"# target_dir={config.target_dir}",
+        f"# target_dir_realpath={config.target_dir_realpath}",
+        f"# kernel={kernel}",
+        f"# bcc_version={bcc_version}",
+        "# mode=exit-only",
+        "# output_format=strace-like",
+        f"# compact={compact}",
+        f"# skipped_syscalls={skipped}",
+    ]
+    return "\n".join(lines)
+
+
+def format_summary(summary: Summary) -> str:
+    lines = [
+        "# summary:",
+        f"# total_events={summary.total_events}",
+        f"# failed_events={summary.failed_events}",
+        f"# lost_events={summary.lost_events}",
+    ]
+    if summary.lost_events > 0:
+        lines.append("# warning=trace may be incomplete because perf buffer dropped events")
+    lines.append("# syscall_counts:")
+    for syscall, count in sorted(summary.syscall_counts.items()):
+        lines.append(f"#   {syscall}={count}")
+    lines.append("# errno_counts:")
+    for errno_value, count in sorted(summary.errno_counts.items()):
+        lines.append(f"#   errno={errno_value} count={count}")
+    return "\n".join(lines)
+
+
+def _escape_c_string(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _syscall_profile(syscall: str) -> tuple[int, int, int, int, int, int, int, int, int]:
+    no_arg = -1
+    xattr_path0 = {
+        "getxattr", "lgetxattr", "setxattr", "lsetxattr", "listxattr",
+        "llistxattr", "removexattr", "lremovexattr",
+    }
+    xattr_fd = {"fgetxattr", "fsetxattr", "flistxattr", "fremovexattr"}
+
+    if syscall == "open":
+        return (0, no_arg, no_arg, 1, 2, no_arg, no_arg, no_arg, no_arg)
+    if syscall == "creat":
+        return (0, no_arg, no_arg, no_arg, 1, no_arg, no_arg, no_arg, no_arg)
+    if syscall in {"stat", "lstat", "access", "rmdir", "unlink", "chown"}:
+        return (0, no_arg, no_arg, no_arg, no_arg, no_arg, no_arg, no_arg, no_arg)
+    if syscall in {"chmod", "mkdir"}:
+        return (0, no_arg, no_arg, no_arg, 1, no_arg, no_arg, no_arg, no_arg)
+    if syscall == "truncate":
+        return (0, no_arg, no_arg, no_arg, no_arg, 1, no_arg, no_arg, no_arg)
+    if syscall == "readlink":
+        return (0, no_arg, no_arg, no_arg, no_arg, 2, no_arg, no_arg, no_arg)
+    if syscall == "openat":
+        return (1, no_arg, no_arg, 2, 3, no_arg, no_arg, no_arg, 0)
+    if syscall == "openat2":
+        return (1, no_arg, no_arg, no_arg, no_arg, 3, no_arg, 2, 0)
+    if syscall in {"newfstatat", "fstatat"}:
+        return (1, no_arg, no_arg, 3, no_arg, no_arg, no_arg, no_arg, 0)
+    if syscall == "statx":
+        return (1, no_arg, no_arg, 2, no_arg, no_arg, no_arg, 3, 0)
+    if syscall in {"faccessat", "faccessat2"}:
+        return (1, no_arg, no_arg, 3, 2, no_arg, no_arg, no_arg, 0)
+    if syscall == "fchmodat":
+        return (1, no_arg, no_arg, 3, 2, no_arg, no_arg, no_arg, 0)
+    if syscall == "fchownat":
+        return (1, no_arg, no_arg, 4, no_arg, no_arg, no_arg, no_arg, 0)
+    if syscall in {"utimensat", "futimesat"}:
+        return (1, no_arg, no_arg, 3, no_arg, no_arg, no_arg, no_arg, 0)
+    if syscall == "readlinkat":
+        return (1, no_arg, no_arg, no_arg, no_arg, 3, no_arg, no_arg, 0)
+    if syscall == "mkdirat":
+        return (1, no_arg, no_arg, no_arg, 2, no_arg, no_arg, no_arg, 0)
+    if syscall == "unlinkat":
+        return (1, no_arg, no_arg, 2, no_arg, no_arg, no_arg, no_arg, 0)
+    if syscall == "name_to_handle_at":
+        return (1, no_arg, no_arg, 4, no_arg, no_arg, no_arg, no_arg, 0)
+    if syscall in xattr_path0:
+        return (0, no_arg, no_arg, 4, no_arg, 3, no_arg, no_arg, no_arg)
+    if syscall in xattr_fd:
+        return (no_arg, no_arg, 0, 4, no_arg, 3, no_arg, no_arg, no_arg)
+    if syscall in {"fstat", "fsync", "fdatasync", "syncfs", "close", "dup"}:
+        return (no_arg, no_arg, 0, no_arg, no_arg, no_arg, no_arg, no_arg, no_arg)
+    if syscall in {"fchmod", "flock", "fcntl"}:
+        return (no_arg, no_arg, 0, 1, no_arg, no_arg, no_arg, no_arg, no_arg)
+    if syscall == "fchown":
+        return (no_arg, no_arg, 0, no_arg, no_arg, no_arg, no_arg, no_arg, no_arg)
+    if syscall == "ftruncate":
+        return (no_arg, no_arg, 0, no_arg, no_arg, 1, no_arg, no_arg, no_arg)
+    if syscall in {"getdents", "getdents64"}:
+        return (no_arg, no_arg, 0, no_arg, no_arg, 2, no_arg, no_arg, no_arg)
+    if syscall == "ioctl":
+        return (no_arg, no_arg, 0, no_arg, no_arg, no_arg, no_arg, 1, no_arg)
+    if syscall == "lseek":
+        return (no_arg, no_arg, 0, no_arg, no_arg, no_arg, 1, no_arg, no_arg)
+    if syscall == "fallocate":
+        return (no_arg, no_arg, 0, no_arg, 1, 3, 2, no_arg, no_arg)
+    if syscall in {"rename", "link", "symlink"}:
+        return (0, 1, no_arg, no_arg, no_arg, no_arg, no_arg, no_arg, no_arg)
+    if syscall == "renameat2":
+        return (1, 3, no_arg, 4, no_arg, no_arg, no_arg, no_arg, 0)
+    if syscall in {"renameat", "linkat"}:
+        return (1, 3, no_arg, no_arg, no_arg, no_arg, no_arg, no_arg, 0)
+    if syscall in {"dup2", "dup3"}:
+        return (no_arg, no_arg, 0, 2, no_arg, no_arg, no_arg, no_arg, no_arg)
+    if syscall == "close_range":
+        return (no_arg, no_arg, 0, 1, no_arg, no_arg, no_arg, no_arg, no_arg)
+    return (no_arg, no_arg, no_arg, no_arg, no_arg, no_arg, no_arg, no_arg, no_arg)
+
+
+def _maintenance_kind(syscall: str) -> int:
+    if syscall == "close":
+        return 1
+    if syscall == "close_range":
+        return 2
+    if syscall in {"dup", "dup2", "dup3"}:
+        return 3
+    if syscall == "fcntl":
+        return 4
+    return 0
+
+
+def build_bpf_source(target_dir: str, enabled_syscalls: list[str]) -> str:
+    syscall_comment = ",".join(enabled_syscalls)
+    escaped_target = _escape_c_string(target_dir)
+    target_len = len(target_dir.encode("utf-8"))
+    probe_functions = []
+    for syscall_id, syscall in enumerate(enabled_syscalls, start=1):
+        safe_name = syscall.replace("-", "_")
+        p1, p2, fd, flags, mode, size, offset, request, dirfd = _syscall_profile(syscall)
+        is_business = 1 if syscall in BUSINESS_SYSCALLS else 0
+        is_producer = 1 if syscall in FD_PRODUCER_SYSCALLS else 0
+        maint_kind = _maintenance_kind(syscall)
+        probe_functions.append(
+            f"int trace_enter_{safe_name}(struct sys_enter_ctx *ctx) {{ "
+            f"return handle_enter(ctx, {syscall_id}, {p1}, {p2}, {fd}, {flags}, {mode}, {size}, {offset}, {request}, {dirfd}); }}\n"
+            f"int trace_exit_{safe_name}(struct sys_exit_ctx *ctx) {{ "
+            f"return handle_exit(ctx, {syscall_id}, {is_business}, {is_producer}, {maint_kind}); }}"
+        )
+    probes = "\n".join(probe_functions)
+    return f"""
+#include <uapi/linux/ptrace.h>
+#include <linux/sched.h>
+
+#define MAX_PATH_LEN 256
+#define MAX_XATTR_NAME_LEN 64
+#define TARGET_DIR \"{escaped_target}\"
+#define TARGET_DIR_LEN {target_len}
+// enabled_syscalls={syscall_comment}
+
+struct sys_enter_ctx {{
+    unsigned short common_type;
+    unsigned char common_flags;
+    unsigned char common_preempt_count;
+    int common_pid;
+    long id;
+    unsigned long args[6];
+}};
+
+struct sys_exit_ctx {{
+    unsigned short common_type;
+    unsigned char common_flags;
+    unsigned char common_preempt_count;
+    int common_pid;
+    long id;
+    long ret;
+}};
+
+struct entry_t {{
+    u64 start_ns;
+    u32 syscall_id;
+    u32 matched_mask;
+    int fd;
+    int dirfd;
+    u64 flags;
+    u64 mode;
+    u64 size;
+    s64 offset;
+    u64 request;
+    char path1[MAX_PATH_LEN];
+    char path2[MAX_PATH_LEN];
+}};
+
+struct fd_key_t {{
+    u32 tgid;
+    int fd;
+}};
+
+struct fd_value_t {{
+    char path[MAX_PATH_LEN];
+}};
+
+struct event_t {{
+    u64 timestamp_ns;
+    u32 pid;
+    u32 tid;
+    char comm[16];
+    u32 syscall_id;
+    u32 matched_mask;
+    u64 latency_ns;
+    s64 ret;
+    int errno_value;
+    int fd;
+    int dirfd;
+    u64 flags;
+    u64 mode;
+    u64 size;
+    s64 offset;
+    u64 request;
+    char path1[MAX_PATH_LEN];
+    char path2[MAX_PATH_LEN];
+    char xattr_name[MAX_XATTR_NAME_LEN];
+}};
+
+BPF_HASH(entry_map, u64, struct entry_t, 16384);
+BPF_HASH(fd_map, struct fd_key_t, struct fd_value_t, 65536);
+BPF_PERF_OUTPUT(events);
+
+static __always_inline int path_matches(char *path) {{
+    if (TARGET_DIR_LEN == 1 && TARGET_DIR[0] == '/') {{
+        return path[0] == '/';
+    }}
+    int matched = 1;
+#pragma unroll
+    for (int i = 0; i < MAX_PATH_LEN; i++) {{
+        if (i < TARGET_DIR_LEN && path[i] != TARGET_DIR[i]) {{
+            matched = 0;
+        }}
+    }}
+    if (!matched) {{
+        return 0;
+    }}
+    char next = path[TARGET_DIR_LEN];
+    return next == 0 || next == '/';
+}}
+
+static __always_inline void copy_fd_path(u32 tgid, int fd, struct entry_t *entry) {{
+    struct fd_key_t key = {{}};
+    key.tgid = tgid;
+    key.fd = fd;
+    struct fd_value_t *value = fd_map.lookup(&key);
+    if (value) {{
+        __builtin_memcpy(entry->path1, value->path, sizeof(entry->path1));
+        entry->matched_mask |= 4;
+    }}
+}}
+
+static __always_inline int handle_enter(
+    struct sys_enter_ctx *ctx,
+    u32 syscall_id,
+    int path1_idx,
+    int path2_idx,
+    int fd_idx,
+    int flags_idx,
+    int mode_idx,
+    int size_idx,
+    int offset_idx,
+    int request_idx,
+    int dirfd_idx
+) {{
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u32 tgid = pid_tgid >> 32;
+    struct entry_t entry = {{}};
+    entry.start_ns = bpf_ktime_get_ns();
+    entry.syscall_id = syscall_id;
+    entry.fd = -1;
+    entry.dirfd = -1;
+    if (fd_idx >= 0) {{
+        entry.fd = (int)ctx->args[fd_idx];
+    }}
+    if (dirfd_idx >= 0) {{
+        entry.dirfd = (int)ctx->args[dirfd_idx];
+    }}
+    if (flags_idx >= 0) {{
+        entry.flags = ctx->args[flags_idx];
+    }}
+    if (mode_idx >= 0) {{
+        entry.mode = ctx->args[mode_idx];
+    }}
+    if (size_idx >= 0) {{
+        entry.size = ctx->args[size_idx];
+    }}
+    if (offset_idx >= 0) {{
+        entry.offset = (s64)ctx->args[offset_idx];
+    }}
+    if (request_idx >= 0) {{
+        entry.request = ctx->args[request_idx];
+    }}
+    if (path1_idx >= 0) {{
+        bpf_probe_read_user_str(&entry.path1, sizeof(entry.path1), (void *)ctx->args[path1_idx]);
+        if (path_matches(entry.path1)) {{
+            entry.matched_mask |= 1;
+        }}
+    }}
+    if (path2_idx >= 0) {{
+        bpf_probe_read_user_str(&entry.path2, sizeof(entry.path2), (void *)ctx->args[path2_idx]);
+        if (path_matches(entry.path2)) {{
+            entry.matched_mask |= 2;
+        }}
+    }}
+    if (fd_idx >= 0 && path1_idx < 0) {{
+        copy_fd_path(tgid, entry.fd, &entry);
+    }}
+    entry_map.update(&pid_tgid, &entry);
+    return 0;
+}}
+
+static __always_inline void update_open_fd(u32 tgid, int fd, struct entry_t *entry) {{
+    if (fd < 0 || !(entry->matched_mask & 1)) {{
+        return;
+    }}
+    struct fd_key_t key = {{}};
+    struct fd_value_t value = {{}};
+    key.tgid = tgid;
+    key.fd = fd;
+    __builtin_memcpy(value.path, entry->path1, sizeof(value.path));
+    fd_map.update(&key, &value);
+}}
+
+static __always_inline void delete_fd(u32 tgid, int fd) {{
+    struct fd_key_t key = {{}};
+    key.tgid = tgid;
+    key.fd = fd;
+    fd_map.delete(&key);
+}}
+
+static __always_inline void duplicate_fd(u32 tgid, int old_fd, int new_fd) {{
+    struct fd_key_t old_key = {{}};
+    old_key.tgid = tgid;
+    old_key.fd = old_fd;
+    struct fd_value_t *old_value = fd_map.lookup(&old_key);
+    if (!old_value || new_fd < 0) {{
+        return;
+    }}
+    struct fd_key_t new_key = {{}};
+    struct fd_value_t new_value = {{}};
+    new_key.tgid = tgid;
+    new_key.fd = new_fd;
+    __builtin_memcpy(new_value.path, old_value->path, sizeof(new_value.path));
+    fd_map.update(&new_key, &new_value);
+}}
+
+static __always_inline int handle_exit(
+    struct sys_exit_ctx *ctx,
+    u32 syscall_id,
+    int is_business,
+    int is_producer,
+    int maintenance_kind
+) {{
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u32 tgid = pid_tgid >> 32;
+    u32 tid = (u32)pid_tgid;
+    struct entry_t *entry = entry_map.lookup(&pid_tgid);
+    if (!entry) {{
+        return 0;
+    }}
+    s64 ret = ctx->ret;
+    if (is_producer && ret >= 0) {{
+        update_open_fd(tgid, (int)ret, entry);
+    }}
+    if (ret >= 0 && maintenance_kind == 1) {{
+        delete_fd(tgid, entry->fd);
+    }} else if (ret >= 0 && maintenance_kind == 2) {{
+        int first = entry->fd;
+        int last = (int)entry->flags;
+#pragma unroll
+        for (int i = 0; i < 256; i++) {{
+            int current = first + i;
+            if (current <= last) {{
+                delete_fd(tgid, current);
+            }}
+        }}
+    }} else if (ret >= 0 && maintenance_kind == 3) {{
+        duplicate_fd(tgid, entry->fd, (int)ret);
+    }} else if (ret >= 0 && maintenance_kind == 4) {{
+        if (entry->flags == 0 || entry->flags == 1030) {{
+            duplicate_fd(tgid, entry->fd, (int)ret);
+        }}
+    }}
+    if (is_business && entry->matched_mask) {{
+        struct event_t event = {{}};
+        event.timestamp_ns = bpf_ktime_get_ns();
+        event.pid = tgid;
+        event.tid = tid;
+        event.syscall_id = syscall_id;
+        event.matched_mask = entry->matched_mask;
+        event.latency_ns = event.timestamp_ns - entry->start_ns;
+        event.ret = ret;
+        event.errno_value = ret < 0 ? (int)(-ret) : 0;
+        event.fd = entry->fd;
+        event.dirfd = entry->dirfd;
+        event.flags = entry->flags;
+        event.mode = entry->mode;
+        event.size = entry->size;
+        event.offset = entry->offset;
+        event.request = entry->request;
+        __builtin_memcpy(event.path1, entry->path1, sizeof(event.path1));
+        __builtin_memcpy(event.path2, entry->path2, sizeof(event.path2));
+        bpf_get_current_comm(&event.comm, sizeof(event.comm));
+        events.perf_submit(ctx, &event, sizeof(event));
+    }}
+    entry_map.delete(&pid_tgid);
+    return 0;
+}}
+{probes}
+"""
+
+
+def discover_tracepoints(
+    syscalls: list[str],
+    tracing_events_dir: str = "/sys/kernel/debug/tracing/events/syscalls",
+) -> tuple[list[str], list[str]]:
+    root = Path(tracing_events_dir)
+    enabled: list[str] = []
+    skipped: list[str] = []
+    if not root.exists() or not root.is_dir():
+        return [], list(syscalls)
+    for syscall in syscalls:
+        enter_path = root / f"sys_enter_{syscall}"
+        exit_path = root / f"sys_exit_{syscall}"
+        if enter_path.exists() and exit_path.exists():
+            enabled.append(syscall)
+        else:
+            skipped.append(syscall)
+    return enabled, skipped
+
+
+class OutputWriter:
+    def __init__(self, output_path: str | None, follow: bool, stdout=None) -> None:
+        self._stdout = stdout if stdout is not None else sys.stdout
+        self._file = None
+        self._closed = False
+        self._follow = follow
+        if output_path is not None:
+            try:
+                self._file = open(output_path, "a", encoding="utf-8")
+            except OSError as exc:
+                raise UserError(f"cannot open output file: {output_path}: {exc}") from exc
+
+    def write_line(self, line: str) -> None:
+        if self._closed:
+            raise UserError("cannot write to closed output writer")
+        text = line + "\n"
+        if self._file is not None:
+            self._file.write(text)
+            if self._follow:
+                self._stdout.write(text)
+        else:
+            self._stdout.write(text)
+
+    def flush(self) -> None:
+        if self._file is not None:
+            self._file.flush()
+        self._stdout.flush()
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self.flush()
+        if self._file is not None:
+            self._file.close()
+        self._closed = True
+
+
+class TracerRuntime:
+    def __init__(self, config: TracerConfig, stdout=None, stderr=None) -> None:
+        self.config = config
+        self.stdout = stdout if stdout is not None else sys.stdout
+        self.stderr = stderr if stderr is not None else sys.stderr
+        self.summary = Summary()
+        self._stop = False
+        self._writer: OutputWriter | None = None
+        self._events_table = None
+        self._syscall_names_by_id: dict[int, str] = {}
+
+    def _import_bpf(self):
+        try:
+            from bcc import BPF  # type: ignore
+        except ImportError as exc:
+            raise TracerRuntimeError("BCC Python bindings are not available") from exc
+        return BPF
+
+    def _bcc_version(self) -> str:
+        try:
+            import bcc  # type: ignore
+        except ImportError:
+            return "unknown"
+        return getattr(bcc, "__version__", "unknown")
+
+    def _handle_lost_events(self, lost_count: int) -> None:
+        self.summary.record_lost(lost_count)
+        print(f"warning: perf buffer lost {lost_count} events", file=self.stderr)
+
+    def _decode_c_string(self, value) -> str:
+        if isinstance(value, bytes):
+            raw = value
+        else:
+            raw = bytes(value)
+        return raw.split(b"\0", 1)[0].decode("utf-8", errors="replace")
+
+    def _matched_text(self, matched_mask: int) -> str:
+        names = []
+        if matched_mask & 1:
+            names.append("src" if matched_mask & 2 else "path")
+        if matched_mask & 2:
+            names.append("dst")
+        if matched_mask & 4:
+            names.append("fd")
+        return ",".join(names) if names else "unknown"
+
+    def _format_args_text(self, syscall: str, record) -> str:
+        path1 = self._decode_c_string(record.path1)
+        path2 = self._decode_c_string(record.path2)
+        parts: list[str] = []
+        if record.matched_mask & 4:
+            fd_path = path1 if path1 else "?"
+            parts.append(f"fd={record.fd}<{fd_path}>")
+        elif path1:
+            parts.append(repr(path1))
+        if path2:
+            parts.append(repr(path2))
+        if record.dirfd != -1:
+            parts.append(f"dirfd={record.dirfd}")
+        if record.fd != -1 and not (record.matched_mask & 4):
+            parts.append(f"fd={record.fd}")
+        if record.flags:
+            parts.append(f"flags={record.flags}")
+        if record.mode:
+            parts.append(f"mode={record.mode:o}")
+        if record.size:
+            parts.append(f"size={record.size}")
+        if record.offset:
+            parts.append(f"offset={record.offset}")
+        if record.request:
+            name = "cmd" if syscall == "fcntl" else "request"
+            parts.append(f"{name}={record.request}")
+        return ", ".join(parts)
+
+    def _trace_event_from_record(self, record) -> TraceEvent:
+        syscall = self._syscall_names_by_id.get(record.syscall_id, f"syscall#{record.syscall_id}")
+        return TraceEvent(
+            timestamp_ns=int(record.timestamp_ns),
+            pid=int(record.pid),
+            tid=int(record.tid),
+            comm=self._decode_c_string(record.comm),
+            syscall=syscall,
+            matched=self._matched_text(int(record.matched_mask)),
+            latency_ns=int(record.latency_ns),
+            ret=int(record.ret),
+            errno=int(record.errno_value) if int(record.ret) < 0 else None,
+            args_text=self._format_args_text(syscall, record),
+        )
+
+    def _handle_event(self, cpu, data, size) -> None:
+        del cpu, size
+        if self._events_table is None or self._writer is None:
+            return
+        record = self._events_table.event(data)
+        event = self._trace_event_from_record(record)
+        self.summary.record_event(event)
+        self._writer.write_line(format_event_line(event, compact=self.config.compact))
+
+    def _request_stop(self, signum, frame) -> None:
+        del signum, frame
+        self._stop = True
+
+    def run(self) -> int:
+        all_syscalls = sorted(BUSINESS_SYSCALLS | FD_MAINTENANCE_SYSCALLS)
+        enabled, skipped = discover_tracepoints(all_syscalls)
+        if not enabled:
+            raise TracerRuntimeError("no usable syscall tracepoints found")
+        self._syscall_names_by_id = {
+            syscall_id: syscall for syscall_id, syscall in enumerate(enabled, start=1)
+        }
+
+        writer = OutputWriter(self.config.output_path, self.config.follow, stdout=self.stdout)
+        self._writer = writer
+        try:
+            writer.write_line(
+                format_header(
+                    self.config,
+                    kernel=platform.release(),
+                    bcc_version=self._bcc_version(),
+                    skipped_syscalls=skipped,
+                )
+            )
+            BPF = self._import_bpf()
+            source = build_bpf_source(self.config.target_dir, enabled)
+            try:
+                bpf = BPF(text=source)
+            except Exception as exc:  # BCC raises library-specific exceptions.
+                raise TracerRuntimeError(f"failed to load BPF program: {exc}") from exc
+
+            for syscall in enabled:
+                safe_name = syscall.replace("-", "_")
+                try:
+                    bpf.attach_tracepoint(
+                        tp=f"syscalls:sys_enter_{syscall}", fn_name=f"trace_enter_{safe_name}"
+                    )
+                    bpf.attach_tracepoint(
+                        tp=f"syscalls:sys_exit_{syscall}", fn_name=f"trace_exit_{safe_name}"
+                    )
+                except Exception as exc:
+                    raise TracerRuntimeError(f"failed to attach tracepoint for {syscall}: {exc}") from exc
+
+            self._events_table = bpf["events"]
+            self._events_table.open_perf_buffer(self._handle_event, lost_cb=self._handle_lost_events)
+            old_handler = signal.getsignal(signal.SIGINT)
+            signal.signal(signal.SIGINT, self._request_stop)
+            deadline = None
+            if self.config.duration_sec is not None:
+                deadline = time.monotonic() + self.config.duration_sec
+            try:
+                while not self._stop:
+                    if deadline is not None and time.monotonic() >= deadline:
+                        break
+                    bpf.perf_buffer_poll(timeout=100)
+            except KeyboardInterrupt:
+                self._stop = True
+            finally:
+                signal.signal(signal.SIGINT, old_handler)
+
+            summary_text = format_summary(self.summary)
+            print(summary_text, file=self.stderr)
+            if self.config.output_path is not None:
+                writer.write_line(summary_text)
+            return 0
+        finally:
+            self._writer = None
+            self._events_table = None
+            writer.close()
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entrypoint."""
+    try:
+        args = parse_args(argv)
+        config = build_config(args)
+        return TracerRuntime(config).run()
+    except UserError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except TracerRuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
