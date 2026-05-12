@@ -1,6 +1,6 @@
-# fuse-posix-tracer
+# posix-tracer
 
-`fuse-posix-tracer` 是一个基于 Python + eBPF/BCC 的 FUSE 挂载目录 POSIX 调用追踪器，用于捕获访问指定目录的文件系统 metadata/control 类 syscall，辅助评估使用场景的 POSIX 语义兼容性。
+`posix-tracer` 是一个基于 Python + eBPF/BCC 的指定目录 POSIX 调用追踪器，用于捕获访问指定目录的文件系统 metadata/control 类 syscall，辅助评估使用场景的 POSIX 语义兼容性。
 
 ## 1. 编译说明
 
@@ -9,13 +9,13 @@
 当前主程序：
 
 ```text
-fuse_posix_tracer.py
+posix-tracer
 ```
 
 可以用 Python 自带工具做语法检查：
 
 ```bash
-python3 -m py_compile fuse_posix_tracer.py
+python3 -m py_compile posix-tracer
 ```
 
 运行单元测试：
@@ -91,19 +91,19 @@ sudo mount -t debugfs debugfs /sys/kernel/debug
 最简单方式是直接分发：
 
 ```text
-fuse_posix_tracer.py
+posix-tracer
 ```
 
 赋予执行权限：
 
 ```bash
-chmod +x fuse_posix_tracer.py
+chmod +x posix-tracer
 ```
 
 然后运行：
 
 ```bash
-sudo ./fuse_posix_tracer.py -d /mnt/objstore -o trace.log -t 60
+sudo ./posix-tracer -d /mnt/objstore -o trace.log -t 60
 ```
 
 ### 3.2 tar.gz 打包
@@ -111,8 +111,8 @@ sudo ./fuse_posix_tracer.py -d /mnt/objstore -o trace.log -t 60
 在项目根目录执行：
 
 ```bash
-tar -czf fuse-posix-tracer.tar.gz \
-  fuse_posix_tracer.py \
+tar -czf posix-tracer.tar.gz \
+  posix-tracer \
   specs \
   tests \
   AGENT.md \
@@ -123,7 +123,7 @@ tar -czf fuse-posix-tracer.tar.gz \
 解包：
 
 ```bash
-tar -xzf fuse-posix-tracer.tar.gz
+tar -xzf posix-tracer.tar.gz
 ```
 
 运行测试：
@@ -137,13 +137,13 @@ python3 -m unittest discover -s tests -v
 可以安装为系统命令：
 
 ```bash
-sudo install -m 755 fuse_posix_tracer.py /usr/local/bin/fuse-posix-tracer
+sudo install -m 755 posix-tracer /usr/local/bin/posix-tracer
 ```
 
 然后使用：
 
 ```bash
-sudo fuse-posix-tracer -d /mnt/objstore -o trace.log -t 60
+sudo posix-tracer -d /mnt/objstore -o trace.log -t 60
 ```
 
 ## 4. 基本使用
@@ -151,7 +151,7 @@ sudo fuse-posix-tracer -d /mnt/objstore -o trace.log -t 60
 ### 4.1 最小用法
 
 ```bash
-sudo python3 fuse_posix_tracer.py -d /mnt/objstore
+sudo python3 posix-tracer -d /mnt/objstore
 ```
 
 含义：
@@ -165,7 +165,7 @@ sudo python3 fuse_posix_tracer.py -d /mnt/objstore
 ### 4.2 追踪 60 秒并写入文件
 
 ```bash
-sudo python3 fuse_posix_tracer.py \
+sudo python3 posix-tracer \
   -d /mnt/objstore \
   -o trace.log \
   -t 60
@@ -176,7 +176,7 @@ sudo python3 fuse_posix_tracer.py \
 ### 4.3 写文件同时打印到 stdout
 
 ```bash
-sudo python3 fuse_posix_tracer.py \
+sudo python3 posix-tracer \
   -d /mnt/objstore \
   -o trace.log \
   -t 60 \
@@ -194,7 +194,7 @@ sudo python3 fuse_posix_tracer.py \
 使用 `--compact` 后，事件行去掉前缀：
 
 ```bash
-sudo python3 fuse_posix_tracer.py \
+sudo python3 posix-tracer \
   -d /mnt/objstore \
   -o trace.log \
   -t 60 \
@@ -214,10 +214,10 @@ getxattr('/mnt/objstore/archive/data.tar', size=255) = -1 (errno=95)
 ### 5.1 终端 1：启动 tracer
 
 ```bash
-mkdir -p /tmp/fuse-posix-tracer-target
+mkdir -p /tmp/posix-tracer-target
 
-sudo python3 fuse_posix_tracer.py \
-  -d /tmp/fuse-posix-tracer-target \
+sudo python3 posix-tracer \
+  -d /tmp/posix-tracer-target \
   -o /tmp/trace.log \
   -t 10 \
   --follow
@@ -226,9 +226,9 @@ sudo python3 fuse_posix_tracer.py \
 ### 5.2 终端 2：制造文件系统操作
 
 ```bash
-touch /tmp/fuse-posix-tracer-target/a
-stat /tmp/fuse-posix-tracer-target/a
-mv /tmp/fuse-posix-tracer-target/a /tmp/fuse-posix-tracer-target/b
+touch /tmp/posix-tracer-target/a
+stat /tmp/posix-tracer-target/a
+mv /tmp/posix-tracer-target/a /tmp/posix-tracer-target/b
 ```
 
 ### 5.3 查看日志
@@ -240,7 +240,7 @@ cat /tmp/trace.log
 日志应包含：
 
 ```text
-# fuse-posix-tracer started_at=...
+# posix-tracer started_at=...
 # target_dir=...
 # target_dir_realpath=...
 # kernel=...

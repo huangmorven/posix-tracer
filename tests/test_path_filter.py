@@ -1,6 +1,6 @@
 import unittest
 
-import fuse_posix_tracer as tracer
+from tests.tracer_module import tracer
 
 
 class PathFilterTest(unittest.TestCase):

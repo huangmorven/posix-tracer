@@ -1,4 +1,4 @@
-# fuse-posix-tracer 项目开发宪法
+# posix-tracer 项目开发宪法
 # Version: 1.0, Ratified: $(date +%Y-%m-%d)
 
 本文件定义了本项目不可动摇的核心开发原则。所有AI Agent在进行技术规划和代码实现时，必须无条件遵循。

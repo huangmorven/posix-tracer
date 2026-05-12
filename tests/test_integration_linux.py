@@ -22,7 +22,7 @@ def bcc_available():
 class LinuxIntegrationTest(unittest.TestCase):
     def run_tracer_with_workload(self, target_dir, output_path, workload, duration="2"):
         project_root = Path(__file__).resolve().parents[1]
-        tracer_script = project_root / "fuse_posix_tracer.py"
+        tracer_script = project_root / "posix-tracer"
         proc = subprocess.Popen(
             [
                 sys.executable,
@@ -65,7 +65,7 @@ class LinuxIntegrationTest(unittest.TestCase):
                 subprocess.run(["mv", str(outside), str(target_dir / "b")], check=True)
 
             log_text = self.run_tracer_with_workload(target_dir, output_path, workload)
-            self.assertIn("# fuse-posix-tracer started_at=", log_text)
+            self.assertIn("# posix-tracer started_at=", log_text)
             self.assertIn("# summary:", log_text)
             event_lines = self.event_lines(log_text)
             self.assertTrue(

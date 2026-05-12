@@ -1,4 +1,4 @@
-# fuse-posix-tracer 核心功能任务列表
+# posix-tracer 核心功能任务列表
 
 > 基于 `specs/001-core-functionality/spec.md` 与 `specs/001-core-functionality/plan.md` 生成。  
 > 必须遵守 `constitution.md`：TDD 优先、标准库优先、显式错误处理、无全局可变状态传递。  
@@ -185,7 +185,7 @@ Phase 4 集成测试与验收
 python3 -m unittest discover -s tests -v
 ```
 
-**预期：** 失败，原因应为 `fuse_posix_tracer` 模块或目标函数/类尚不存在。
+**预期：** 失败，原因应为 `posix-tracer` 脚本或目标函数/类尚不存在。
 
 **依赖：** T001, T002, T003, T004, T005, T006, T007。
 
@@ -195,7 +195,7 @@ python3 -m unittest discover -s tests -v
 
 ### T009 创建生产入口文件与基础错误类型
 
-**文件：** 创建 `fuse_posix_tracer.py`
+**文件：** 创建 `posix-tracer`
 
 **目标：** 创建最小生产模块，定义显式错误类型与 `main()` 骨架。
 
@@ -221,7 +221,7 @@ python3 -m unittest discover -s tests -v
 
 ### T010 实现 CLI 参数解析与配置校验
 
-**文件：** 修改 `fuse_posix_tracer.py`
+**文件：** 修改 `posix-tracer`
 
 **目标：** 让 `tests/test_cli.py` 通过。
 
@@ -232,7 +232,7 @@ python3 -m unittest discover -s tests -v
 3. `build_config(args)` 或等价函数。
 4. `--dir/-d`、`--output/-o`、`--duration/-t`、`--follow`、`--compact`。
 5. 目标目录不存在或非目录时抛 `UserError`。
-6. 不校验目标目录是否为 FUSE。
+6. 不校验目标目录的文件系统类型。
 
 **依赖：** T009。
 
@@ -248,7 +248,7 @@ python3 -m unittest tests.test_cli -v
 
 ### T011 实现路径规范化与前缀匹配
 
-**文件：** 修改 `fuse_posix_tracer.py`
+**文件：** 修改 `posix-tracer`
 
 **目标：** 让 `tests/test_path_filter.py` 通过。
 
@@ -275,7 +275,7 @@ python3 -m unittest tests.test_path_filter -v
 
 ### T012 实现 Python 侧 fd 映射语义模型
 
-**文件：** 修改 `fuse_posix_tracer.py`
+**文件：** 修改 `posix-tracer`
 
 **目标：** 让 `tests/test_fd_table.py` 通过。
 
@@ -303,7 +303,7 @@ python3 -m unittest tests.test_fd_table -v
 
 ### T013 实现 TraceEvent 与事件行格式化
 
-**文件：** 修改 `fuse_posix_tracer.py`
+**文件：** 修改 `posix-tracer`
 
 **目标：** 让 `tests/test_formatter.py` 通过。
 
@@ -331,7 +331,7 @@ python3 -m unittest tests.test_formatter -v
 
 ### T014 实现 Header 与 Summary
 
-**文件：** 修改 `fuse_posix_tracer.py`
+**文件：** 修改 `posix-tracer`
 
 **目标：** 让 `tests/test_summary.py` 通过。
 
@@ -358,7 +358,7 @@ python3 -m unittest tests.test_summary -v
 
 ### T015 实现 syscall catalog 常量
 
-**文件：** 修改 `fuse_posix_tracer.py`
+**文件：** 修改 `posix-tracer`
 
 **目标：** 让 `tests/test_syscall_catalog.py` 的 catalog 断言通过。
 
@@ -412,7 +412,7 @@ python3 -m unittest tests.test_syscall_catalog -v
 
 ### T017 实现 BPF source builder
 
-**文件：** 修改 `fuse_posix_tracer.py`
+**文件：** 修改 `posix-tracer`
 
 **目标：** 让 BPF source builder 测试通过。
 
@@ -467,7 +467,7 @@ python3 -m unittest tests.test_tracepoint_discovery -v
 
 ### T019 实现 tracepoint 探测
 
-**文件：** 修改 `fuse_posix_tracer.py`
+**文件：** 修改 `posix-tracer`
 
 **目标：** 让 `tests/test_tracepoint_discovery.py` 通过。
 
@@ -518,7 +518,7 @@ python3 -m unittest tests.test_output_writer -v
 
 ### T021 实现 OutputWriter
 
-**文件：** 修改 `fuse_posix_tracer.py`
+**文件：** 修改 `posix-tracer`
 
 **目标：** 让 `tests/test_output_writer.py` 通过。
 
@@ -545,7 +545,7 @@ python3 -m unittest tests.test_output_writer -v
 
 ### T022 实现 BCC 运行时适配器
 
-**文件：** 修改 `fuse_posix_tracer.py`
+**文件：** 修改 `posix-tracer`
 
 **目标：** 接入真实 BCC 运行时生命周期。
 
@@ -629,16 +629,16 @@ python3 -m unittest discover -s tests -v
 **命令：**
 
 ```bash
-mkdir -p /tmp/fuse-posix-tracer-target
-sudo python3 fuse_posix_tracer.py -d /tmp/fuse-posix-tracer-target -o /tmp/trace.log -t 10 --follow
+mkdir -p /tmp/posix-tracer-target
+sudo python3 posix-tracer -d /tmp/posix-tracer-target -o /tmp/trace.log -t 10 --follow
 ```
 
 另一个终端执行：
 
 ```bash
-touch /tmp/fuse-posix-tracer-target/a
-stat /tmp/fuse-posix-tracer-target/a
-mv /tmp/fuse-posix-tracer-target/a /tmp/fuse-posix-tracer-target/b
+touch /tmp/posix-tracer-target/a
+stat /tmp/posix-tracer-target/a
+mv /tmp/posix-tracer-target/a /tmp/posix-tracer-target/b
 ```
 
 **依赖：** T024。
@@ -655,11 +655,10 @@ mv /tmp/fuse-posix-tracer-target/a /tmp/fuse-posix-tracer-target/b
 ## 执行规则
 
 1. 必须先完成 T001-T008，再进入任何生产实现任务。
-2. 每个实现任务只修改 `fuse_posix_tracer.py` 一个主要文件。
+2. 每个实现任务只修改 `posix-tracer` 一个主要文件。
 3. 每个测试任务只创建或修改一个 `tests/*.py` 文件。
 4. 不允许引入非标准库测试依赖。
 5. 不允许用 mock 替代 BCC 集成测试；不可用时显式 skip。
 6. 每个任务完成后运行对应验证命令。
 7. 若验证失败，必须先修复当前任务，不得继续后续任务。
 8. 不实现 `spec.md` 明确列为后续增强的能力。
-

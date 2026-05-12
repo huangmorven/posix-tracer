@@ -1,7 +1,7 @@
 import unittest
 from types import SimpleNamespace
 
-import fuse_posix_tracer as tracer
+from tests.tracer_module import tracer
 
 
 class FormatterTest(unittest.TestCase):

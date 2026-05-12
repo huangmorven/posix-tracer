@@ -1,8 +1,8 @@
-# fuse-posix-tracer 核心功能规格说明
+# posix-tracer 核心功能规格说明
 
 ## 1. 背景与目标
 
-`fuse-posix-tracer` 是一个基于 Python + eBPF/BCC 的 Linux 文件系统 syscall 追踪器，用于对指定目录下的 FUSE workload 进行 POSIX 语义兼容性评估。
+`posix-tracer` 是一个基于 Python + eBPF/BCC 的 Linux 文件系统 syscall 追踪器，用于对指定目录下的 filesystem workload 进行 POSIX 语义兼容性评估。
 
 MVP 的核心目标是：用户指定一个目标目录，工具在系统范围内自动捕获所有访问该目录的进程所发起的元数据与控制类 POSIX 文件系统调用，并输出紧凑、可离线分析的 strace-like 日志。
 
@@ -20,13 +20,13 @@ MVP 不追求以下能力：
 4. 不提供完整 symlink、bind mount、mount namespace、chroot 语义解析。
 5. 不提供 `-- command...` 子进程启动模式。
 6. 不默认输出 JSON Lines、CSV 或复杂分析报告。
-7. 不检测目标目录是否为 FUSE 文件系统；目标目录是否为 FUSE 挂载目录由用户保证。
+7. 不检测目标目录的文件系统类型；目标目录是否符合待评估场景由用户保证。
 8. 不追踪并输出 read/write/close 及其变体作为业务事件。
 
 ## 3. MVP 使用方式
 
 ```bash
-sudo python3 fuse_posix_tracer.py -d /mnt/objstore [-o output.log] [-t 60] [--follow] [--compact]
+sudo python3 posix-tracer -d /mnt/objstore [-o output.log] [-t 60] [--follow] [--compact]
 ```
 
 ### 3.1 CLI 参数
@@ -314,7 +314,7 @@ setxattr("/mnt/objstore/a.txt", name="user.key", value_ptr=0x7f..., size=12, fla
 示例：
 
 ```text
-# fuse-posix-tracer started_at=2026-05-11T12:00:00Z
+# posix-tracer started_at=2026-05-11T12:00:00Z
 # target_dir=/mnt/objstore
 # target_dir_realpath=/mnt/objstore
 # kernel=5.15.0-...
@@ -459,7 +459,7 @@ eBPF 程序负责：
 5. 32-bit compat syscall、非 x86_64 架构全覆盖。
 6. BPF perf buffer 满时事件零丢失。
 7. `ioctl`、`stat` 等复杂结构体内容完整解析。
-8. 目标目录一定是 FUSE 文件系统；MVP 不检测文件系统类型。
+8. 目标目录由用户选择；MVP 不检测文件系统类型。
 
 ## 15. 测试与验收标准
 
@@ -545,8 +545,7 @@ rename("/mnt/objstore/a", "/tmp/b") = -1 (errno=18)
 7. 更完整的 fork/clone fd 继承追踪。
 8. mount namespace / chroot / bind mount 感知。
 9. symlink / `..` / realpath 更严格解析。
-10. FUSE 文件系统类型检测和记录。
+10. 文件系统类型检测和记录。
 11. 独立 analyze/report 子命令，生成 POSIX 兼容性风险报告。
 12. arm64 支持矩阵。
 13. 更完整的 `statx`、`ioctl`、`utimensat` 结构体解析。
-

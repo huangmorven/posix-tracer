@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import fuse_posix_tracer as tracer
+from tests.tracer_module import tracer
 
 
 class TracepointDiscoveryTest(unittest.TestCase):

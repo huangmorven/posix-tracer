@@ -1,4 +1,4 @@
-# fuse-posix-tracer 核心功能技术实现方案
+# posix-tracer 核心功能技术实现方案
 
 > 本方案基于 `specs/001-core-functionality/spec.md` 与项目根目录 `constitution.md` 制定。实现时必须严格遵循 TDD：每个功能先写失败测试，再写最小实现，再重构。
 
@@ -6,7 +6,7 @@
 
 ### 1.1 产品目标
 
-`fuse-posix-tracer` 是一个面向离线 POSIX 语义兼容性评估的采集工具。MVP 目标是：用户指定一个目录，工具在系统范围内捕获访问该目录的元数据与控制类 POSIX 文件系统 syscall，并输出紧凑的 strace-like 日志。
+`posix-tracer` 是一个面向离线 POSIX 语义兼容性评估的采集工具。MVP 目标是：用户指定一个目录，工具在系统范围内捕获访问该目录的元数据与控制类 POSIX 文件系统 syscall，并输出紧凑的 strace-like 日志。
 
 ### 1.2 技术选型
 
@@ -32,7 +32,7 @@ MVP 只实现 `spec.md` 明确要求的能力：
 7. header 与 summary footer。
 8. perf buffer lost events 统计。
 
-不实现 `--format jsonl`、syscall group include/exclude、`-- command...`、`--fail-on-lost-events`、FUSE 文件系统类型检测、完整 fork/clone fd 继承、完整复杂结构体展开。
+不实现 `--format jsonl`、syscall group include/exclude、`-- command...`、`--fail-on-lost-events`、文件系统类型检测、完整 fork/clone fd 继承、完整复杂结构体展开。
 
 ## 2. “合宪性”审查
 
@@ -40,7 +40,7 @@ MVP 只实现 `spec.md` 明确要求的能力：
 
 #### 2.1.1 YAGNI
 
-方案只实现 `spec.md` 中的 MVP 功能。所有 P1/P2 能力均不进入第一版，包括 JSONL、分析报告、命令启动模式、FUSE 类型检测、arm64 支持等。
+方案只实现 `spec.md` 中的 MVP 功能。所有 P1/P2 能力均不进入第一版，包括 JSONL、分析报告、命令启动模式、文件系统类型检测、arm64 支持等。
 
 #### 2.1.2 标准库优先
 
@@ -63,7 +63,7 @@ MVP 只实现 `spec.md` 明确要求的能力：
 
 #### 2.1.4 包内聚
 
-MVP 采用一个可执行模块 `fuse_posix_tracer.py`，其内部按职责分区：
+MVP 采用一个可执行模块 `posix-tracer`，其内部按职责分区：
 
 1. CLI 与配置解析。
 2. syscall 元数据定义。
@@ -164,7 +164,7 @@ OutputWriter(stdout / file / follow)
 
 #### ADR-001：使用单文件脚本作为 MVP 交付形态
 
-- **决策**：第一版创建 `fuse_posix_tracer.py`，不预先拆分 package。
+- **决策**：第一版创建 `posix-tracer`，不预先拆分 package。
 - **原因**：项目规模小，MVP 功能集中，符合简单性原则。
 - **代价**：文件可能增长较快。
 - **缓解**：内部按章节组织；如果后续功能扩展，再按测试保护进行拆分。
@@ -196,7 +196,7 @@ OutputWriter(stdout / file / follow)
 
 创建：
 
-- `fuse_posix_tracer.py`
+- `posix-tracer`
 
 内部建议结构：
 
@@ -358,7 +358,7 @@ MVP 可选择较小常量：
 启动成功后立即写入 header：
 
 ```text
-# fuse-posix-tracer started_at=<ISO8601>
+# posix-tracer started_at=<ISO8601>
 # target_dir=<input>
 # target_dir_realpath=<realpath>
 # kernel=<platform.release()>
@@ -421,7 +421,7 @@ def main(argv: list[str] | None = None) -> int:
 
 **文件：**
 
-- 创建：`fuse_posix_tracer.py`
+- 创建：`posix-tracer`
 - 创建：`tests/test_cli.py`
 
 **步骤：**
@@ -435,7 +435,7 @@ def main(argv: list[str] | None = None) -> int:
 
 **文件：**
 
-- 修改：`fuse_posix_tracer.py`
+- 修改：`posix-tracer`
 - 创建：`tests/test_path_filter.py`
 
 **步骤：**
@@ -449,7 +449,7 @@ def main(argv: list[str] | None = None) -> int:
 
 **文件：**
 
-- 修改：`fuse_posix_tracer.py`
+- 修改：`posix-tracer`
 - 创建：`tests/test_fd_table.py`
 
 **步骤：**
@@ -463,7 +463,7 @@ def main(argv: list[str] | None = None) -> int:
 
 **文件：**
 
-- 修改：`fuse_posix_tracer.py`
+- 修改：`posix-tracer`
 - 创建：`tests/test_formatter.py`
 
 **步骤：**
@@ -477,7 +477,7 @@ def main(argv: list[str] | None = None) -> int:
 
 **文件：**
 
-- 修改：`fuse_posix_tracer.py`
+- 修改：`posix-tracer`
 - 创建：`tests/test_summary.py`
 
 **步骤：**
@@ -492,7 +492,7 @@ def main(argv: list[str] | None = None) -> int:
 
 **文件：**
 
-- 修改：`fuse_posix_tracer.py`
+- 修改：`posix-tracer`
 - 创建：`tests/test_syscall_catalog.py`
 
 **步骤：**
@@ -507,7 +507,7 @@ def main(argv: list[str] | None = None) -> int:
 
 **文件：**
 
-- 修改：`fuse_posix_tracer.py`
+- 修改：`posix-tracer`
 - 可追加：`tests/test_syscall_catalog.py`
 
 **步骤：**
@@ -521,7 +521,7 @@ def main(argv: list[str] | None = None) -> int:
 
 **文件：**
 
-- 修改：`fuse_posix_tracer.py`
+- 修改：`posix-tracer`
 
 **步骤：**
 
@@ -549,7 +549,7 @@ def main(argv: list[str] | None = None) -> int:
 **命令：**
 
 ```bash
-sudo python3 fuse_posix_tracer.py -d /mnt/objstore -o trace.log -t 60 --follow
+sudo python3 posix-tracer -d /mnt/objstore -o trace.log -t 60 --follow
 ```
 
 **检查：**
@@ -579,16 +579,16 @@ sudo python3 -m unittest tests.test_integration_linux -v
 手动 smoke test：
 
 ```bash
-mkdir -p /tmp/fuse-posix-tracer-target
-sudo python3 fuse_posix_tracer.py -d /tmp/fuse-posix-tracer-target -o /tmp/trace.log -t 10 --follow
+mkdir -p /tmp/posix-tracer-target
+sudo python3 posix-tracer -d /tmp/posix-tracer-target -o /tmp/trace.log -t 10 --follow
 ```
 
 另一个终端执行：
 
 ```bash
-touch /tmp/fuse-posix-tracer-target/a
-stat /tmp/fuse-posix-tracer-target/a
-mv /tmp/fuse-posix-tracer-target/a /tmp/fuse-posix-tracer-target/b
+touch /tmp/posix-tracer-target/a
+stat /tmp/posix-tracer-target/a
+mv /tmp/posix-tracer-target/a /tmp/posix-tracer-target/b
 ```
 
 ## 11. 风险与缓解
@@ -613,4 +613,3 @@ mv /tmp/fuse-posix-tracer-target/a /tmp/fuse-posix-tracer-target/b
 5. 根据 verifier 错误最小化 BPF 程序，禁止为绕过问题引入复杂抽象。
 
 该顺序可以最大化 TDD 覆盖，降低 BPF 调试成本，并符合项目宪法的简单性、测试先行和明确性原则。
-
