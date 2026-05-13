@@ -38,7 +38,15 @@ class LinuxIntegrationTest(unittest.TestCase):
             stderr=subprocess.PIPE,
             text=True,
         )
-        time.sleep(0.5)
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            if output_path.exists() and "# tracing_ready=true" in output_path.read_text():
+                break
+            time.sleep(0.1)
+        else:
+            proc.terminate()
+            stdout, stderr = proc.communicate(timeout=5)
+            self.fail(f"tracer did not become ready\nstdout={stdout}\nstderr={stderr}")
         workload()
         stdout, stderr = proc.communicate(timeout=8)
         self.assertEqual(proc.returncode, 0, msg=f"stdout={stdout}\nstderr={stderr}")

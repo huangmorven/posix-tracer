@@ -356,12 +356,21 @@ def _maintenance_kind(syscall: str) -> int:
     return 0
 
 
-def build_bpf_source(target_dir: str, enabled_syscalls: list[str]) -> str:
+def build_bpf_source(
+    target_dir: str,
+    enabled_syscalls: list[str],
+    syscall_ids: dict[str, int] | None = None,
+) -> str:
     syscall_comment = ",".join(enabled_syscalls)
     escaped_target = _escape_c_string(target_dir)
     target_len = len(target_dir.encode("utf-8"))
+    path_match_checks = "\n".join(
+        f"    if ((unsigned char)path[{idx}] != {byte}) {{ return 0; }}"
+        for idx, byte in enumerate(target_dir.encode("utf-8"))
+    )
     probe_functions = []
-    for syscall_id, syscall in enumerate(enabled_syscalls, start=1):
+    for default_syscall_id, syscall in enumerate(enabled_syscalls, start=1):
+        syscall_id = syscall_ids[syscall] if syscall_ids is not None else default_syscall_id
         safe_name = syscall.replace("-", "_")
         p1, p2, fd, flags, mode, size, offset, request, dirfd = _syscall_profile(syscall)
         is_business = 1 if syscall in BUSINESS_SYSCALLS else 0
@@ -456,16 +465,7 @@ static __always_inline int path_matches(char *path) {{
     if (TARGET_DIR_LEN == 1 && TARGET_DIR[0] == '/') {{
         return path[0] == '/';
     }}
-    int matched = 1;
-#pragma unroll
-    for (int i = 0; i < MAX_PATH_LEN; i++) {{
-        if (i < TARGET_DIR_LEN && path[i] != TARGET_DIR[i]) {{
-            matched = 0;
-        }}
-    }}
-    if (!matched) {{
-        return 0;
-    }}
+{path_match_checks}
     char next = path[TARGET_DIR_LEN];
     return next == 0 || next == '/';
 }}
@@ -682,6 +682,26 @@ def discover_tracepoints(
     return enabled, skipped
 
 
+def group_syscalls_for_bpf(enabled_syscalls: list[str], path_chunk_size: int = 8) -> list[list[str]]:
+    fd_related = []
+    path_only = []
+    for syscall in enabled_syscalls:
+        p1, p2, fd, *_ = _syscall_profile(syscall)
+        if fd >= 0 or syscall in FD_PRODUCER_SYSCALLS or syscall in FD_MAINTENANCE_SYSCALLS:
+            fd_related.append(syscall)
+        elif p1 >= 0 or p2 >= 0:
+            path_only.append(syscall)
+        else:
+            path_only.append(syscall)
+
+    groups: list[list[str]] = []
+    if fd_related:
+        groups.append(fd_related)
+    for idx in range(0, len(path_only), path_chunk_size):
+        groups.append(path_only[idx : idx + path_chunk_size])
+    return groups
+
+
 class OutputWriter:
     def __init__(self, output_path: str | None, follow: bool, stdout=None) -> None:
         self._stdout = stdout if stdout is not None else sys.stdout
@@ -727,7 +747,7 @@ class TracerRuntime:
         self.summary = Summary()
         self._stop = False
         self._writer: OutputWriter | None = None
-        self._events_table = None
+        self._events_tables = []
         self._syscall_names_by_id: dict[int, str] = {}
 
     def _import_bpf(self):
@@ -765,11 +785,13 @@ class TracerRuntime:
             names.append("fd")
         return ",".join(names) if names else "unknown"
 
-    def _format_args_text(self, syscall: str, record) -> str:
+    def _format_args_text(self, syscall: str, record, matched_mask: int | None = None) -> str:
+        if matched_mask is None:
+            matched_mask = int(record.matched_mask)
         path1 = self._decode_c_string(record.path1)
         path2 = self._decode_c_string(record.path2)
         parts: list[str] = []
-        if record.matched_mask & 4:
+        if matched_mask & 4:
             fd_path = path1 if path1 else "?"
             parts.append(f"fd={record.fd}<{fd_path}>")
         elif path1:
@@ -793,19 +815,35 @@ class TracerRuntime:
             parts.append(f"{name}={record.request}")
         return ", ".join(parts)
 
-    def _trace_event_from_record(self, record) -> TraceEvent:
+    def _target_matched_mask(self, record, path1: str, path2: str) -> int:
+        original_mask = int(record.matched_mask)
+        target_mask = 0
+        if original_mask & 1 and path1 and is_path_under_target(path1, self.config.target_dir):
+            target_mask |= 1
+        if original_mask & 2 and path2 and is_path_under_target(path2, self.config.target_dir):
+            target_mask |= 2
+        if original_mask & 4 and path1 and is_path_under_target(path1, self.config.target_dir):
+            target_mask |= 4
+        return target_mask
+
+    def _trace_event_from_record(self, record) -> TraceEvent | None:
         syscall = self._syscall_names_by_id.get(record.syscall_id, f"syscall#{record.syscall_id}")
+        path1 = self._decode_c_string(record.path1)
+        path2 = self._decode_c_string(record.path2)
+        matched_mask = self._target_matched_mask(record, path1, path2)
+        if not matched_mask:
+            return None
         return TraceEvent(
             timestamp_ns=int(record.timestamp_ns),
             pid=int(record.pid),
             tid=int(record.tid),
             comm=self._decode_c_string(record.comm),
             syscall=syscall,
-            matched=self._matched_text(int(record.matched_mask)),
+            matched=self._matched_text(matched_mask),
             latency_ns=int(record.latency_ns),
             ret=int(record.ret),
             errno=int(record.errno_value) if int(record.ret) < 0 else None,
-            args_text=self._format_args_text(syscall, record),
+            args_text=self._format_args_text(syscall, record, matched_mask),
         )
 
     def _handle_event(self, cpu, data, size) -> None:
@@ -814,6 +852,8 @@ class TracerRuntime:
             return
         record = ctypes.cast(data, ctypes.POINTER(PerfEventRecord)).contents
         event = self._trace_event_from_record(record)
+        if event is None:
+            return
         self.summary.record_event(event)
         self._writer.write_line(format_event_line(event, compact=self.config.compact))
 
@@ -842,26 +882,34 @@ class TracerRuntime:
                 )
             )
             BPF = self._import_bpf()
-            source = build_bpf_source(self.config.target_dir, enabled)
-            try:
-                bpf = BPF(text=source)
-            except Exception as exc:  # BCC raises library-specific exceptions.
-                raise TracerRuntimeError(f"failed to load BPF program: {exc}") from exc
-
-            for syscall in enabled:
-                safe_name = syscall.replace("-", "_")
+            syscall_ids = {syscall: syscall_id for syscall_id, syscall in enumerate(enabled, start=1)}
+            bpfs = []
+            for syscall_group in group_syscalls_for_bpf(enabled):
+                source = build_bpf_source(self.config.target_dir, syscall_group, syscall_ids=syscall_ids)
                 try:
-                    bpf.attach_tracepoint(
-                        tp=f"syscalls:sys_enter_{syscall}", fn_name=f"trace_enter_{safe_name}"
-                    )
-                    bpf.attach_tracepoint(
-                        tp=f"syscalls:sys_exit_{syscall}", fn_name=f"trace_exit_{safe_name}"
-                    )
-                except Exception as exc:
-                    raise TracerRuntimeError(f"failed to attach tracepoint for {syscall}: {exc}") from exc
+                    bpf = BPF(text=source)
+                except Exception as exc:  # BCC raises library-specific exceptions.
+                    group_text = ",".join(syscall_group)
+                    raise TracerRuntimeError(f"failed to load BPF program for {group_text}: {exc}") from exc
 
-            self._events_table = bpf["events"]
-            self._events_table.open_perf_buffer(self._handle_event, lost_cb=self._handle_lost_events)
+                for syscall in syscall_group:
+                    safe_name = syscall.replace("-", "_")
+                    try:
+                        bpf.attach_tracepoint(
+                            tp=f"syscalls:sys_enter_{syscall}", fn_name=f"trace_enter_{safe_name}"
+                        )
+                        bpf.attach_tracepoint(
+                            tp=f"syscalls:sys_exit_{syscall}", fn_name=f"trace_exit_{safe_name}"
+                        )
+                    except Exception as exc:
+                        raise TracerRuntimeError(f"failed to attach tracepoint for {syscall}: {exc}") from exc
+
+                events_table = bpf["events"]
+                events_table.open_perf_buffer(self._handle_event, lost_cb=self._handle_lost_events)
+                self._events_tables.append(events_table)
+                bpfs.append(bpf)
+            writer.write_line("# tracing_ready=true")
+            writer.flush()
             old_handler = signal.getsignal(signal.SIGINT)
             signal.signal(signal.SIGINT, self._request_stop)
             deadline = None
@@ -871,7 +919,8 @@ class TracerRuntime:
                 while not self._stop:
                     if deadline is not None and time.monotonic() >= deadline:
                         break
-                    bpf.perf_buffer_poll(timeout=100)
+                    for bpf in bpfs:
+                        bpf.perf_buffer_poll(timeout=10)
             except KeyboardInterrupt:
                 self._stop = True
             finally:
@@ -884,7 +933,7 @@ class TracerRuntime:
             return 0
         finally:
             self._writer = None
-            self._events_table = None
+            self._events_tables = []
             writer.close()
 
 
