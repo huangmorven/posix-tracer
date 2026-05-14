@@ -32,6 +32,25 @@ class SyscallCatalogTest(unittest.TestCase):
             with self.subTest(syscall=syscall):
                 self.assertIn(syscall, tracer.FD_PRODUCER_SYSCALLS)
 
+    def test_fd_map_dependent_syscalls_share_one_bpf_group(self):
+        enabled = sorted(tracer.BUSINESS_SYSCALLS | tracer.FD_MAINTENANCE_SYSCALLS)
+
+        groups = tracer.group_syscalls_for_bpf(enabled, path_chunk_size=3)
+        fd_groups = [
+            set(group)
+            for group in groups
+            if any(tracer._uses_fd_map(syscall) for syscall in group)
+        ]
+        fd_group = fd_groups[0]
+
+        self.assertEqual(len(fd_groups), 1)
+        for syscall in enabled:
+            with self.subTest(syscall=syscall):
+                if tracer._uses_fd_map(syscall):
+                    self.assertIn(syscall, fd_group)
+                else:
+                    self.assertNotIn(syscall, fd_group)
+
     def test_build_bpf_source_contains_required_sections(self):
         source = tracer.build_bpf_source("/mnt/objstore", ["openat", "statx"])
         self.assertIsInstance(source, str)
@@ -46,10 +65,18 @@ class SyscallCatalogTest(unittest.TestCase):
             "events.perf_submit",
             "MAX_PATH_LEN 256",
             "MAX_XATTR_NAME_LEN 64",
+            "MAX_CLOSE_RANGE_FDS 64",
         ]
         for part in expected_parts:
             with self.subTest(part=part):
                 self.assertIn(part, source)
+
+    def test_close_range_cleanup_uses_bounded_unroll(self):
+        source = tracer.build_bpf_source("/mnt/objstore", ["close_range"])
+
+        self.assertIn("#define MAX_CLOSE_RANGE_FDS 64", source)
+        self.assertIn("i < MAX_CLOSE_RANGE_FDS", source)
+        self.assertNotIn("i < 256", source)
 
     def test_each_business_syscall_has_path_or_fd_match_input(self):
         for syscall in sorted(tracer.BUSINESS_SYSCALLS):

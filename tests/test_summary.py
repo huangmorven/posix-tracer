@@ -42,6 +42,7 @@ class SummaryTest(unittest.TestCase):
             "# bcc_version=0.30.0",
             "# mode=exit-only",
             "# output_format=strace-like",
+            "# event_time_zone=UTC",
             "# compact=true",
             "# skipped_syscalls=openat2,faccessat2",
         ]

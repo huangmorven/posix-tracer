@@ -1,5 +1,6 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from tests.tracer_module import tracer
 
@@ -44,12 +45,68 @@ class FormatterTest(unittest.TestCase):
     def test_latency_format_rounds_to_microseconds(self):
         self.assertEqual(tracer.format_latency(34_000), "34us")
 
+    def test_event_time_converts_monotonic_timestamp_to_wall_clock(self):
+        with patch.object(tracer.time, "time_ns", return_value=100_000_000_000), patch.object(
+            tracer.time, "monotonic_ns", return_value=10_000_000_000
+        ):
+            self.assertEqual(tracer._monotonic_to_epoch_ns(5_000_000_000), 95_000_000_000)
+            self.assertEqual(tracer._format_time(5_000_000_000), "00:01:35.000000")
+
+    def test_runtime_closes_open_perf_event_tables(self):
+        class FakeEventsTable:
+            def __init__(self):
+                self._open_key_fds = {0: -1, 1: -1}
+                self.closed = []
+
+            def __delitem__(self, key):
+                self.closed.append(key)
+                del self._open_key_fds[key]
+
+        runtime = tracer.TracerRuntime(self.make_config())
+        events_table = FakeEventsTable()
+        runtime._events_tables.append(events_table)
+
+        runtime._close_events_tables()
+
+        self.assertEqual(events_table.closed, [0, 1])
+        self.assertEqual(events_table._open_key_fds, {})
+
     def test_fd_args_are_preserved(self):
         line = tracer.format_event_line(
             self.make_event(syscall="fstat", args_text="fd=5</mnt/objstore/a>"),
             compact=True,
         )
         self.assertIn("fd=5</mnt/objstore/a>", line)
+
+    def test_zero_valued_syscall_args_are_preserved(self):
+        runtime = tracer.TracerRuntime(self.make_config())
+        base_record = {
+            "matched_mask": 1,
+            "fd": 5,
+            "dirfd": -100,
+            "flags": 0,
+            "mode": 0,
+            "size": 0,
+            "offset": 0,
+            "request": 0,
+            "path1": b"/mnt/objstore/a\0",
+            "path2": b"\0",
+        }
+
+        cases = [
+            ("openat", "flags=0", "mode=0"),
+            ("truncate", "size=0", None),
+            ("lseek", "offset=0", None),
+            ("fcntl", "cmd=0", None),
+        ]
+        for syscall, expected_arg, extra_expected_arg in cases:
+            with self.subTest(syscall=syscall):
+                record = SimpleNamespace(**base_record)
+                text = runtime._format_args_text(syscall, record)
+
+                self.assertIn(expected_arg, text)
+                if extra_expected_arg is not None:
+                    self.assertIn(extra_expected_arg, text)
 
     def test_runtime_decodes_bpf_record_into_trace_event(self):
         runtime = tracer.TracerRuntime(self.make_config())
@@ -82,6 +139,8 @@ class FormatterTest(unittest.TestCase):
         self.assertEqual(event.matched, "path")
         self.assertEqual(event.ret, 3)
         self.assertIn("/mnt/objstore/a", event.args_text)
+        self.assertIn("flags=0", event.args_text)
+        self.assertIn("mode=0", event.args_text)
 
     def make_config(self):
         return tracer.TracerConfig(
