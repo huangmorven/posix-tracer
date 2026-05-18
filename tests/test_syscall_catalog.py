@@ -64,12 +64,30 @@ class SyscallCatalogTest(unittest.TestCase):
             "handle_exit",
             "events.perf_submit",
             "MAX_PATH_LEN 256",
-            "MAX_XATTR_NAME_LEN 64",
             "MAX_CLOSE_RANGE_FDS 64",
         ]
         for part in expected_parts:
             with self.subTest(part=part):
                 self.assertIn(part, source)
+        self.assertNotIn("MAX_XATTR_NAME_LEN", source)
+        self.assertNotIn("char xattr_name", source)
+        self.assertNotIn("bpf_probe_read_str(&entry->xattr_name", source)
+        self.assertNotIn("event->xattr_name", source)
+
+    def test_xattr_name_capture_is_opt_in(self):
+        source = tracer.build_bpf_source(
+            "/mnt/objstore",
+            ["getxattr", "setxattr", "listxattr"],
+            capture_xattr_name=True,
+        )
+
+        self.assertIn("#define MAX_XATTR_NAME_LEN 256", source)
+        self.assertIn("char xattr_name[MAX_XATTR_NAME_LEN]", source)
+        self.assertIn("bpf_probe_read_str(&entry->xattr_name", source)
+        self.assertIn("sizeof(event->xattr_name)", source)
+        self.assertIn("handle_enter(ctx, 1, 0, -1, -1, -1, -1, 3, -1, -1, -1, 1)", source)
+        self.assertIn("handle_enter(ctx, 2, 0, -1, -1, 4, -1, 3, -1, -1, -1, 1)", source)
+        self.assertIn("handle_enter(ctx, 3, 0, -1, -1, -1, -1, 2, -1, -1, -1, -1)", source)
 
     def test_close_range_cleanup_uses_bounded_unroll(self):
         source = tracer.build_bpf_source("/mnt/objstore", ["close_range"])

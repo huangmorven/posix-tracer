@@ -424,8 +424,9 @@ python3 -m unittest tests.test_syscall_catalog -v
 4. `fd_map`。
 5. `events` perf output。
 6. `MAX_PATH_LEN = 256`。
-7. `MAX_XATTR_NAME_LEN = 64`。
-8. 代码只生成字符串，不在该任务加载 BCC。
+7. `MAX_XATTR_NAME_LEN = 256`，仅在显式启用 xattr name 捕获时加入 event struct。
+8. 默认 event struct 不包含 xattr name 字段。
+9. 代码只生成字符串，不在该任务加载 BCC。
 
 **依赖：** T016。
 

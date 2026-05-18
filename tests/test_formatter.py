@@ -152,6 +152,49 @@ class FormatterTest(unittest.TestCase):
         self.assertIn("op=2", text)
         self.assertNotIn("flags=", text)
 
+    def test_xattr_name_is_rendered_when_capture_is_enabled(self):
+        config = self.make_config(capture_xattr_name=True)
+        runtime = tracer.TracerRuntime(config)
+        record = SimpleNamespace(
+            matched_mask=1,
+            fd=-1,
+            dirfd=-1,
+            flags=0,
+            mode=0,
+            size=255,
+            offset=0,
+            request=0,
+            path1=b"/mnt/objstore/a\0",
+            path2=b"\0",
+            xattr_name=b"security.selinux\0",
+        )
+
+        text = runtime._format_args_text("getxattr", record)
+
+        self.assertIn("name='security.selinux'", text)
+        self.assertIn("size=255", text)
+
+    def test_xattr_name_is_not_rendered_by_default(self):
+        runtime = tracer.TracerRuntime(self.make_config())
+        record = SimpleNamespace(
+            matched_mask=1,
+            fd=-1,
+            dirfd=-1,
+            flags=0,
+            mode=0,
+            size=255,
+            offset=0,
+            request=0,
+            path1=b"/mnt/objstore/a\0",
+            path2=b"\0",
+            xattr_name=b"security.selinux\0",
+        )
+
+        text = runtime._format_args_text("getxattr", record)
+
+        self.assertNotIn("name=", text)
+        self.assertIn("size=255", text)
+
     def test_runtime_decodes_bpf_record_into_trace_event(self):
         runtime = tracer.TracerRuntime(self.make_config())
         runtime._syscall_names_by_id = {1: "openat"}
@@ -186,7 +229,7 @@ class FormatterTest(unittest.TestCase):
         self.assertIn("flags=0", event.args_text)
         self.assertIn("mode=0", event.args_text)
 
-    def make_config(self):
+    def make_config(self, capture_xattr_name=False):
         return tracer.TracerConfig(
             target_dir="/mnt/objstore",
             target_dir_realpath="/mnt/objstore",
@@ -194,6 +237,7 @@ class FormatterTest(unittest.TestCase):
             duration_sec=None,
             follow=False,
             compact=False,
+            capture_xattr_name=capture_xattr_name,
         )
 
 

@@ -211,6 +211,20 @@ sudo python3 posix-tracer \
 getxattr('/mnt/objstore/archive/data.tar', size=255) = -1 (errno=95)
 ```
 
+### 4.5 可选 xattr name 捕获
+
+默认情况下，事件结构不包含 xattr name 字段，以减少 perf buffer 带宽占用。需要分析具体 xattr key 时，可以显式启用：
+
+```bash
+sudo python3 posix-tracer \
+  -d /mnt/objstore \
+  -o trace.log \
+  -t 60 \
+  --capture-xattr-name
+```
+
+启用后，`getxattr`、`setxattr`、`removexattr` 及对应 `l*` / `f*` 形式会尝试输出 `name=...`。该字段使用 256 字节缓冲区，超过缓冲区的 xattr name 会被内核侧字符串读取截断。
+
 ## 5. 推荐 smoke test
 
 在 Linux + root + BCC 环境中执行。
@@ -249,6 +263,8 @@ cat /tmp/trace.log
 # target_dir_realpath=...
 # target_match=literal absolute path prefix
 # target_match_warning=symlinked target directories or access paths can cause missed or ambiguous events; pass the realpath, for example readlink -f <dir>, to reduce ambiguity
+# capture_xattr_name=false
+# xattr_name_buffer_bytes=0
 # kernel=...
 # bcc_version=...
 # mode=exit-only

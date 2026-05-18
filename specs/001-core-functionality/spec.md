@@ -277,12 +277,18 @@ MVP 参数记录原则：
 
 ## 10. 输出格式
 
-MVP 默认输出紧凑 strace-like 单行文本格式。
+MVP 默认输出紧凑 strace-like 单行文本格式。默认事件结构不携带 xattr name 字段；只有显式启用 `--capture-xattr-name` 时，才使用 256 字节缓冲区捕获并渲染 xattr name。超过该缓冲区的 name 允许被截断。
 
 默认事件行格式：
 
 ```text
 [12:01:03.123456 pid=1234 comm=python3 latency=34us matched=path] getxattr("/mnt/objstore/archive/data.tar", name="security.selinux", size=255) = -1 (errno=95)
+```
+
+未启用 `--capture-xattr-name` 时，同一类事件不包含 `name=`：
+
+```text
+[12:01:03.123456 pid=1234 comm=python3 latency=34us matched=path] getxattr("/mnt/objstore/archive/data.tar", size=255) = -1 (errno=95)
 ```
 
 `--compact` 事件行格式：
@@ -317,6 +323,10 @@ setxattr("/mnt/objstore/a.txt", name="user.key", value_ptr=0x7f..., size=12, fla
 # posix-tracer started_at=2026-05-11T12:00:00Z
 # target_dir=/mnt/objstore
 # target_dir_realpath=/mnt/objstore
+# target_match=literal absolute path prefix
+# target_match_warning=symlinked target directories or access paths can cause missed or ambiguous events; pass the realpath, for example readlink -f <dir>, to reduce ambiguity
+# capture_xattr_name=false
+# xattr_name_buffer_bytes=0
 # kernel=5.15.0-...
 # bcc_version=...
 # mode=exit-only

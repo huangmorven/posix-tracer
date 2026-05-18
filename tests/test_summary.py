@@ -12,6 +12,7 @@ class SummaryTest(unittest.TestCase):
             duration_sec=None,
             follow=False,
             compact=compact,
+            capture_xattr_name=False,
         )
 
     def make_event(self, syscall="openat", ret=0, errno_value=None):
@@ -40,6 +41,8 @@ class SummaryTest(unittest.TestCase):
             "# target_dir_realpath=/mnt/objstore",
             "# target_match=literal absolute path prefix",
             "# target_match_warning=symlinked target directories or access paths can cause missed or ambiguous events",
+            "# capture_xattr_name=false",
+            "# xattr_name_buffer_bytes=0",
             "# kernel=5.15.0-test",
             "# bcc_version=0.30.0",
             "# mode=exit-only",
@@ -51,6 +54,27 @@ class SummaryTest(unittest.TestCase):
         for part in expected_parts:
             with self.subTest(part=part):
                 self.assertIn(part, header)
+
+    def test_header_reports_xattr_name_capture_buffer_when_enabled(self):
+        config = tracer.TracerConfig(
+            target_dir="/mnt/objstore",
+            target_dir_realpath="/mnt/objstore",
+            output_path=None,
+            duration_sec=None,
+            follow=False,
+            compact=False,
+            capture_xattr_name=True,
+        )
+
+        header = tracer.format_header(
+            config,
+            kernel="5.15.0-test",
+            bcc_version="0.30.0",
+            skipped_syscalls=[],
+        )
+
+        self.assertIn("# capture_xattr_name=true", header)
+        self.assertIn("# xattr_name_buffer_bytes=256", header)
 
     def test_summary_counts_events_failures_lost_syscalls_and_errno(self):
         summary = tracer.Summary()

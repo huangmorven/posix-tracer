@@ -328,14 +328,14 @@ BPF 向用户态传输固定大小结构，避免动态分配：
 - `request`
 - `path1[MAX_PATH_LEN]`
 - `path2[MAX_PATH_LEN]`
-- `xattr_name[MAX_XATTR_NAME_LEN]`
+- `xattr_name[MAX_XATTR_NAME_LEN]`（仅在显式启用 xattr name 捕获时进入 event struct）
 
 MVP 可选择较小常量：
 
 - `MAX_PATH_LEN = 256`
-- `MAX_XATTR_NAME_LEN = 64`
+- `MAX_XATTR_NAME_LEN = 256`（仅用于 `--capture-xattr-name`）
 
-路径过长时允许截断，并在格式化中用 `...` 表示。
+路径或 xattr name 过长时允许截断，并在格式化中用 `...` 表示。
 
 ### 6.4 syscall family 处理
 

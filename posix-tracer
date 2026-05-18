@@ -39,6 +39,7 @@ BUSINESS_SYSCALLS: set[str] = set().union(*SYSCALL_GROUPS.values())
 FD_MAINTENANCE_SYSCALLS: set[str] = {"close", "close_range", "dup", "dup2", "dup3", "fcntl"}
 FD_PRODUCER_SYSCALLS: set[str] = {"open", "openat", "openat2", "creat"}
 MAX_BPF_PATH_LEN = 256
+MAX_XATTR_NAME_LEN = 256
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,7 @@ class TracerConfig:
     duration_sec: float | None
     follow: bool
     compact: bool
+    capture_xattr_name: bool
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -58,6 +60,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("-t", "--duration", dest="duration_sec", type=float)
     parser.add_argument("--follow", action="store_true")
     parser.add_argument("--compact", action="store_true")
+    parser.add_argument(
+        "--capture-xattr-name",
+        action="store_true",
+        help="capture and render xattr name arguments using a 256-byte per-event buffer",
+    )
     return parser.parse_args(argv)
 
 
@@ -78,6 +85,7 @@ def build_config(args: argparse.Namespace) -> TracerConfig:
         duration_sec=args.duration_sec,
         follow=args.follow,
         compact=args.compact,
+        capture_xattr_name=args.capture_xattr_name,
     )
 
 
@@ -138,8 +146,7 @@ class TraceEvent:
     args_text: str
 
 
-class PerfEventRecord(ctypes.Structure):
-    _fields_ = [
+PERF_EVENT_RECORD_FIELDS = [
         ("timestamp_ns", ctypes.c_uint64),
         ("pid", ctypes.c_uint32),
         ("tid", ctypes.c_uint32),
@@ -158,7 +165,16 @@ class PerfEventRecord(ctypes.Structure):
         ("request", ctypes.c_uint64),
         ("path1", ctypes.c_char * MAX_BPF_PATH_LEN),
         ("path2", ctypes.c_char * MAX_BPF_PATH_LEN),
-        ("xattr_name", ctypes.c_char * 64),
+]
+
+
+class PerfEventRecord(ctypes.Structure):
+    _fields_ = PERF_EVENT_RECORD_FIELDS
+
+
+class PerfEventRecordWithXattrName(ctypes.Structure):
+    _fields_ = PERF_EVENT_RECORD_FIELDS + [
+        ("xattr_name", ctypes.c_char * MAX_XATTR_NAME_LEN),
     ]
 
 
@@ -229,6 +245,8 @@ def format_header(
         f"# target_dir_realpath={config.target_dir_realpath}",
         "# target_match=literal absolute path prefix",
         "# target_match_warning=symlinked target directories or access paths can cause missed or ambiguous events; pass the realpath, for example readlink -f <dir>, to reduce ambiguity",
+        f"# capture_xattr_name={'true' if config.capture_xattr_name else 'false'}",
+        f"# xattr_name_buffer_bytes={MAX_XATTR_NAME_LEN if config.capture_xattr_name else 0}",
         f"# kernel={kernel}",
         f"# bcc_version={bcc_version}",
         "# mode=exit-only",
@@ -353,6 +371,22 @@ def _syscall_profile(syscall: str) -> tuple[int, int, int, int, int, int, int, i
     return (no_arg, no_arg, no_arg, no_arg, no_arg, no_arg, no_arg, no_arg, no_arg)
 
 
+def _xattr_name_idx(syscall: str) -> int:
+    if syscall in {
+        "getxattr",
+        "lgetxattr",
+        "setxattr",
+        "lsetxattr",
+        "removexattr",
+        "lremovexattr",
+        "fgetxattr",
+        "fsetxattr",
+        "fremovexattr",
+    }:
+        return 1
+    return -1
+
+
 def _maintenance_kind(syscall: str) -> int:
     if syscall == "close":
         return 1
@@ -369,6 +403,7 @@ def build_bpf_source(
     target_dir: str,
     enabled_syscalls: list[str],
     syscall_ids: dict[str, int] | None = None,
+    capture_xattr_name: bool = False,
 ) -> str:
     syscall_comment = ",".join(enabled_syscalls)
     escaped_target = _escape_c_string(target_dir)
@@ -382,19 +417,36 @@ def build_bpf_source(
         syscall_id = syscall_ids[syscall] if syscall_ids is not None else default_syscall_id
         safe_name = syscall.replace("-", "_")
         p1, p2, fd, flags, mode, size, offset, request, dirfd = _syscall_profile(syscall)
+        xattr_name_idx = _xattr_name_idx(syscall) if capture_xattr_name else -1
         is_business = 1 if syscall in BUSINESS_SYSCALLS else 0
         is_producer = 1 if syscall in FD_PRODUCER_SYSCALLS else 0
         maint_kind = _maintenance_kind(syscall)
         probe_functions.append(
             f"int trace_enter_{safe_name}(struct sys_enter_ctx *ctx) {{ "
-            f"return handle_enter(ctx, {syscall_id}, {p1}, {p2}, {fd}, {flags}, {mode}, {size}, {offset}, {request}, {dirfd}); }}\n"
+            f"return handle_enter(ctx, {syscall_id}, {p1}, {p2}, {fd}, {flags}, {mode}, {size}, {offset}, {request}, {dirfd}, {xattr_name_idx}); }}\n"
             f"int trace_exit_{safe_name}(struct sys_exit_ctx *ctx) {{ "
             f"return handle_exit(ctx, {syscall_id}, {is_business}, {is_producer}, {maint_kind}); }}"
         )
     probes = "\n".join(probe_functions)
+    xattr_define = f"#define MAX_XATTR_NAME_LEN {MAX_XATTR_NAME_LEN}" if capture_xattr_name else ""
+    entry_xattr_field = "    char xattr_name[MAX_XATTR_NAME_LEN];" if capture_xattr_name else ""
+    event_xattr_field = "    char xattr_name[MAX_XATTR_NAME_LEN];" if capture_xattr_name else ""
+    read_xattr_name = (
+        """
+    if (xattr_name_idx >= 0) {
+        bpf_probe_read_str(&entry->xattr_name, sizeof(entry->xattr_name), (void *)ctx->args[xattr_name_idx]);
+    }"""
+        if capture_xattr_name
+        else ""
+    )
+    copy_xattr_name = (
+        "        __builtin_memcpy(event->xattr_name, entry->xattr_name, sizeof(event->xattr_name));"
+        if capture_xattr_name
+        else ""
+    )
     return f"""
 #define MAX_PATH_LEN 256
-#define MAX_XATTR_NAME_LEN 64
+{xattr_define}
 #define MAX_CLOSE_RANGE_FDS 64
 #define TARGET_DIR \"{escaped_target}\"
 #define TARGET_DIR_LEN {target_len}
@@ -431,6 +483,7 @@ struct entry_t {{
     u64 request;
     char path1[MAX_PATH_LEN];
     char path2[MAX_PATH_LEN];
+{entry_xattr_field}
 }};
 
 struct fd_key_t {{
@@ -461,7 +514,7 @@ struct event_t {{
     u64 request;
     char path1[MAX_PATH_LEN];
     char path2[MAX_PATH_LEN];
-    char xattr_name[MAX_XATTR_NAME_LEN];
+{event_xattr_field}
 }};
 
 BPF_HASH(entry_map, u64, struct entry_t, 16384);
@@ -502,7 +555,8 @@ static __always_inline int handle_enter(
     int size_idx,
     int offset_idx,
     int request_idx,
-    int dirfd_idx
+    int dirfd_idx,
+    int xattr_name_idx
 ) {{
     u64 pid_tgid = bpf_get_current_pid_tgid();
     u32 tgid = pid_tgid >> 32;
@@ -537,6 +591,7 @@ static __always_inline int handle_enter(
     if (request_idx >= 0) {{
         entry->request = ctx->args[request_idx];
     }}
+{read_xattr_name}
     if (path1_idx >= 0) {{
         bpf_probe_read_str(&entry->path1, sizeof(entry->path1), (void *)ctx->args[path1_idx]);
         if (path_matches(entry->path1)) {{
@@ -663,6 +718,7 @@ static __always_inline int handle_exit(
         event->request = entry->request;
         __builtin_memcpy(event->path1, entry->path1, sizeof(event->path1));
         __builtin_memcpy(event->path2, entry->path2, sizeof(event->path2));
+{copy_xattr_name}
         bpf_get_current_comm(&event->comm, sizeof(event->comm));
         events.perf_submit(ctx, event, sizeof(*event));
     }}
@@ -816,6 +872,10 @@ class TracerRuntime:
             parts.append(repr(path1))
         if path2:
             parts.append(repr(path2))
+        if self.config.capture_xattr_name and _xattr_name_idx(syscall) >= 0 and hasattr(record, "xattr_name"):
+            xattr_name = self._decode_c_string(record.xattr_name)
+            if xattr_name:
+                parts.append(f"name={xattr_name!r}")
         if dirfd_idx >= 0:
             parts.append(f"dirfd={record.dirfd}")
         if fd_idx >= 0 and not (record.matched_mask & 4):
@@ -869,7 +929,8 @@ class TracerRuntime:
         del cpu, size
         if self._writer is None:
             return
-        record = ctypes.cast(data, ctypes.POINTER(PerfEventRecord)).contents
+        record_type = PerfEventRecordWithXattrName if self.config.capture_xattr_name else PerfEventRecord
+        record = ctypes.cast(data, ctypes.POINTER(record_type)).contents
         event = self._trace_event_from_record(record)
         if event is None:
             return
@@ -915,7 +976,12 @@ class TracerRuntime:
             BPF = self._import_bpf()
             syscall_ids = {syscall: syscall_id for syscall_id, syscall in enumerate(enabled, start=1)}
             for syscall_group in group_syscalls_for_bpf(enabled):
-                source = build_bpf_source(self.config.target_dir, syscall_group, syscall_ids=syscall_ids)
+                source = build_bpf_source(
+                    self.config.target_dir,
+                    syscall_group,
+                    syscall_ids=syscall_ids,
+                    capture_xattr_name=self.config.capture_xattr_name,
+                )
                 try:
                     bpf = BPF(text=source)
                 except Exception as exc:  # BCC raises library-specific exceptions.

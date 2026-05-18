@@ -21,6 +21,7 @@ class CliTest(unittest.TestCase):
                 "1.5",
                 "--follow",
                 "--compact",
+                "--capture-xattr-name",
             ])
             config = tracer.build_config(args)
 
@@ -30,6 +31,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(config.duration_sec, 1.5)
         self.assertTrue(config.follow)
         self.assertTrue(config.compact)
+        self.assertTrue(config.capture_xattr_name)
 
     def test_short_options(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -40,6 +42,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(config.duration_sec, 2.0)
         self.assertFalse(config.follow)
         self.assertFalse(config.compact)
+        self.assertFalse(config.capture_xattr_name)
 
     def test_missing_target_directory_raises_user_error(self):
         args = tracer.parse_args(["--dir", "/path/that/does/not/exist"])
