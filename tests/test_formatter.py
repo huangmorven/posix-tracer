@@ -5,6 +5,14 @@ from unittest.mock import patch
 from tests.tracer_module import tracer
 
 
+class FakeWriter:
+    def __init__(self):
+        self.lines = []
+
+    def write_line(self, line):
+        self.lines.append(line)
+
+
 class FormatterTest(unittest.TestCase):
     def make_event(self, **overrides):
         values = {
@@ -228,6 +236,68 @@ class FormatterTest(unittest.TestCase):
         self.assertIn("/mnt/objstore/a", event.args_text)
         self.assertIn("flags=0", event.args_text)
         self.assertIn("mode=0", event.args_text)
+
+    def test_handle_event_decodes_default_ctypes_record_without_xattr_name(self):
+        runtime = tracer.TracerRuntime(self.make_config())
+        runtime._syscall_names_by_id = {1: "getxattr"}
+        runtime._writer = FakeWriter()
+        record = self.make_ctypes_record(
+            tracer.PerfEventRecord,
+            syscall_id=1,
+            size=255,
+            path1=b"/mnt/objstore/a\0",
+        )
+
+        runtime._handle_event(0, tracer.ctypes.pointer(record), tracer.ctypes.sizeof(record))
+
+        self.assertEqual(len(runtime._writer.lines), 1)
+        self.assertIn("getxattr('/mnt/objstore/a', size=255)", runtime._writer.lines[0])
+        self.assertNotIn("name=", runtime._writer.lines[0])
+
+    def test_handle_event_decodes_xattr_ctypes_record_when_capture_is_enabled(self):
+        runtime = tracer.TracerRuntime(self.make_config(capture_xattr_name=True))
+        runtime._syscall_names_by_id = {1: "getxattr"}
+        runtime._writer = FakeWriter()
+        record = self.make_ctypes_record(
+            tracer.PerfEventRecordWithXattrName,
+            syscall_id=1,
+            size=255,
+            path1=b"/mnt/objstore/a\0",
+            xattr_name=b"security.selinux\0",
+        )
+
+        runtime._handle_event(0, tracer.ctypes.pointer(record), tracer.ctypes.sizeof(record))
+
+        self.assertEqual(len(runtime._writer.lines), 1)
+        self.assertIn("name='security.selinux'", runtime._writer.lines[0])
+        self.assertIn("size=255", runtime._writer.lines[0])
+
+    def make_ctypes_record(self, record_type, **overrides):
+        record = record_type()
+        values = {
+            "timestamp_ns": 1000,
+            "pid": 10,
+            "tid": 11,
+            "comm": b"touch\0",
+            "syscall_id": 1,
+            "matched_mask": 1,
+            "latency_ns": 2500,
+            "ret": 0,
+            "errno_value": 0,
+            "fd": -1,
+            "dirfd": -1,
+            "flags": 0,
+            "mode": 0,
+            "size": 0,
+            "offset": 0,
+            "request": 0,
+            "path1": b"\0",
+            "path2": b"\0",
+        }
+        values.update(overrides)
+        for key, value in values.items():
+            setattr(record, key, value)
+        return record
 
     def make_config(self, capture_xattr_name=False):
         return tracer.TracerConfig(

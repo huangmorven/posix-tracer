@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 import os
 import platform
 import subprocess
@@ -20,20 +21,25 @@ def bcc_available():
 @unittest.skipUnless(hasattr(os, "geteuid") and os.geteuid() == 0, "requires root")
 @unittest.skipUnless(bcc_available(), "requires BCC")
 class LinuxIntegrationTest(unittest.TestCase):
-    def run_tracer_with_workload(self, target_dir, output_path, workload, duration="2"):
+    XATTR_NAME = "user.posix_tracer_key"
+
+    def run_tracer_with_workload(self, target_dir, output_path, workload, duration="2", extra_args=None):
         project_root = Path(__file__).resolve().parents[1]
         tracer_script = project_root / "posix-tracer"
+        command = [
+            sys.executable,
+            str(tracer_script),
+            "--dir",
+            str(target_dir),
+            "--output",
+            str(output_path),
+            "--duration",
+            duration,
+        ]
+        if extra_args:
+            command.extend(extra_args)
         proc = subprocess.Popen(
-            [
-                sys.executable,
-                str(tracer_script),
-                "--dir",
-                str(target_dir),
-                "--output",
-                str(output_path),
-                "--duration",
-                duration,
-            ],
+            command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -47,13 +53,53 @@ class LinuxIntegrationTest(unittest.TestCase):
             proc.terminate()
             stdout, stderr = proc.communicate(timeout=5)
             self.fail(f"tracer did not become ready\nstdout={stdout}\nstderr={stderr}")
-        workload()
+        try:
+            workload()
+        except Exception:
+            proc.terminate()
+            proc.communicate(timeout=5)
+            raise
         stdout, stderr = proc.communicate(timeout=8)
         self.assertEqual(proc.returncode, 0, msg=f"stdout={stdout}\nstderr={stderr}")
         return output_path.read_text()
 
     def event_lines(self, log_text):
         return [line for line in log_text.splitlines() if line and not line.startswith("#")]
+
+    def run_xattr_workload(self, target_file):
+        target_file.write_text("payload")
+        os.setxattr(str(target_file), self.XATTR_NAME, b"value")
+        self.assertEqual(os.getxattr(str(target_file), self.XATTR_NAME), b"value")
+        self.assertIn(self.XATTR_NAME, os.listxattr(str(target_file)))
+        os.removexattr(str(target_file), self.XATTR_NAME)
+
+    def xattr_event_lines(self, log_text):
+        return [line for line in self.event_lines(log_text) if "xattr(" in line]
+
+    @contextmanager
+    def bind_mounted_target(self, tmpdir):
+        backing_dir = Path(tmpdir, "backing-target")
+        mount_point = Path(tmpdir, "mounted-target")
+        backing_dir.mkdir()
+        mount_point.mkdir()
+        result = subprocess.run(
+            ["mount", "--bind", str(backing_dir), str(mount_point)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if result.returncode != 0:
+            self.skipTest(f"bind mount is not available: {result.stderr}")
+        try:
+            yield mount_point
+        finally:
+            subprocess.run(
+                ["umount", str(mount_point)],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
 
     def test_integration_environment_can_create_target_directory(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -134,6 +180,46 @@ class LinuxIntegrationTest(unittest.TestCase):
             event_lines = self.event_lines(log_text)
             self.assertTrue(any(str(target_dir / "inside") in line for line in event_lines), msg=log_text)
             self.assertFalse(any(str(sibling_dir / "outside") in line for line in event_lines), msg=log_text)
+
+    def test_tracer_captures_xattr_workload_without_name_by_default(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir, "trace.log")
+            with self.bind_mounted_target(tmpdir) as target_dir:
+                target_file = target_dir / "xattr-workload"
+                log_text = self.run_tracer_with_workload(
+                    target_dir,
+                    output_path,
+                    lambda: self.run_xattr_workload(target_file),
+                )
+            xattr_lines = self.xattr_event_lines(log_text)
+
+            self.assertIn("# capture_xattr_name=false", log_text)
+            self.assertIn("# xattr_name_buffer_bytes=0", log_text)
+            self.assertTrue(any("setxattr(" in line and str(target_file) in line for line in xattr_lines), msg=log_text)
+            self.assertTrue(any("getxattr(" in line and str(target_file) in line for line in xattr_lines), msg=log_text)
+            self.assertTrue(any("removexattr(" in line and str(target_file) in line for line in xattr_lines), msg=log_text)
+            self.assertFalse(any("name=" in line for line in xattr_lines), msg=log_text)
+            self.assertFalse(any(self.XATTR_NAME in line for line in xattr_lines), msg=log_text)
+
+    def test_tracer_captures_xattr_workload_with_name_when_enabled(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir, "trace.log")
+            with self.bind_mounted_target(tmpdir) as target_dir:
+                target_file = target_dir / "xattr-workload"
+                log_text = self.run_tracer_with_workload(
+                    target_dir,
+                    output_path,
+                    lambda: self.run_xattr_workload(target_file),
+                    extra_args=["--capture-xattr-name"],
+                )
+            xattr_lines = self.xattr_event_lines(log_text)
+            expected_name = f"name='{self.XATTR_NAME}'"
+
+            self.assertIn("# capture_xattr_name=true", log_text)
+            self.assertIn("# xattr_name_buffer_bytes=256", log_text)
+            self.assertTrue(any("setxattr(" in line and expected_name in line for line in xattr_lines), msg=log_text)
+            self.assertTrue(any("getxattr(" in line and expected_name in line for line in xattr_lines), msg=log_text)
+            self.assertTrue(any("removexattr(" in line and expected_name in line for line in xattr_lines), msg=log_text)
 
 
 if __name__ == "__main__":

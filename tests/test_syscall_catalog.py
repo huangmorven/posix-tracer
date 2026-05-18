@@ -89,6 +89,24 @@ class SyscallCatalogTest(unittest.TestCase):
         self.assertIn("handle_enter(ctx, 2, 0, -1, -1, 4, -1, 3, -1, -1, -1, 1)", source)
         self.assertIn("handle_enter(ctx, 3, 0, -1, -1, -1, -1, 2, -1, -1, -1, -1)", source)
 
+    def test_ctypes_perf_event_layout_keeps_xattr_name_opt_in(self):
+        default_fields = [name for name, _type in tracer.PerfEventRecord._fields_]
+        xattr_fields = [name for name, _type in tracer.PerfEventRecordWithXattrName._fields_]
+
+        self.assertEqual(default_fields, [name for name, _type in tracer.PERF_EVENT_RECORD_FIELDS])
+        self.assertNotIn("xattr_name", default_fields)
+        self.assertEqual(xattr_fields, default_fields + ["xattr_name"])
+        self.assertEqual(
+            tracer.ctypes.sizeof(tracer.PerfEventRecordWithXattrName),
+            tracer.ctypes.sizeof(tracer.PerfEventRecord) + tracer.MAX_XATTR_NAME_LEN,
+        )
+        for field_name in default_fields:
+            with self.subTest(field_name=field_name):
+                self.assertEqual(
+                    getattr(tracer.PerfEventRecord, field_name).offset,
+                    getattr(tracer.PerfEventRecordWithXattrName, field_name).offset,
+                )
+
     def test_close_range_cleanup_uses_bounded_unroll(self):
         source = tracer.build_bpf_source("/mnt/objstore", ["close_range"])
 
