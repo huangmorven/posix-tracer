@@ -956,14 +956,26 @@ class TracerRuntime:
 
     def _close_events_tables(self) -> None:
         for events_table in self._events_tables:
-            open_key_fds = getattr(events_table, "_open_key_fds", None)
+            try:
+                open_key_fds = getattr(events_table, "_open_key_fds", None)
+            except Exception:
+                continue
             if not open_key_fds:
                 continue
-            for key in list(open_key_fds.keys()):
+            try:
+                keys = list(open_key_fds.keys())
+            except Exception:
+                continue
+            for key in keys:
                 try:
                     del events_table[key]
                 except KeyError:
-                    open_key_fds.pop(key, None)
+                    try:
+                        open_key_fds.pop(key, None)
+                    except Exception:
+                        pass
+                except Exception:
+                    continue
 
     def run(self) -> int:
         self._clock_offset_ns = _clock_offset_ns()

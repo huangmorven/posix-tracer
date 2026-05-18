@@ -79,6 +79,44 @@ class FormatterTest(unittest.TestCase):
         self.assertEqual(events_table.closed, [0, 1])
         self.assertEqual(events_table._open_key_fds, {})
 
+    def test_runtime_best_effort_closes_perf_event_tables(self):
+        class MissingOpenFds:
+            pass
+
+        class BrokenOpenFds:
+            @property
+            def _open_key_fds(self):
+                raise RuntimeError("private BCC attr changed")
+
+        class BrokenKeys:
+            def __init__(self):
+                self._open_key_fds = self
+
+            def keys(self):
+                raise RuntimeError("keys unavailable")
+
+        class BrokenDelete:
+            def __init__(self):
+                self._open_key_fds = {0: -1, 1: -1}
+                self.attempted = []
+
+            def __delitem__(self, key):
+                self.attempted.append(key)
+                raise RuntimeError("delete unavailable")
+
+        runtime = tracer.TracerRuntime(self.make_config())
+        broken_delete = BrokenDelete()
+        runtime._events_tables.extend([
+            MissingOpenFds(),
+            BrokenOpenFds(),
+            BrokenKeys(),
+            broken_delete,
+        ])
+
+        runtime._close_events_tables()
+
+        self.assertEqual(broken_delete.attempted, [0, 1])
+
     def test_fd_args_are_preserved(self):
         line = tracer.format_event_line(
             self.make_event(syscall="fstat", args_text="fd=5</mnt/objstore/a>"),
