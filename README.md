@@ -239,6 +239,19 @@ sudo python3 posix-tracer \
 
 `--syscalls` 使用逗号分隔 syscall 名称。每个名称必须属于默认支持的业务 syscall 集合；例如 `read`、`write`、`close` 不属于业务输出范围，会被拒绝。重复项会自动去重，空项会被视为用户输入错误。
 
+`--syscalls` 支持的名称如下：
+
+| 分组 | 可选 syscall |
+| --- | --- |
+| `path_open` | `creat`, `name_to_handle_at`, `open`, `openat`, `openat2` |
+| `metadata_read` | `access`, `faccessat`, `faccessat2`, `fstat`, `fstatat`, `lstat`, `newfstatat`, `readlink`, `readlinkat`, `stat`, `statx` |
+| `metadata_write` | `chmod`, `chown`, `fchmod`, `fchmodat`, `fchown`, `fchownat`, `ftruncate`, `futimesat`, `lchown`, `truncate`, `utime`, `utimensat`, `utimes` |
+| `directory` | `getdents`, `getdents64`, `mkdir`, `mkdirat`, `rmdir` |
+| `link_rename_delete` | `link`, `linkat`, `rename`, `renameat`, `renameat2`, `symlink`, `symlinkat`, `unlink`, `unlinkat` |
+| `fd_control` | `fcntl`, `fdatasync`, `flock`, `fsync`, `ioctl`, `lseek`, `syncfs` |
+| `xattr` | `fgetxattr`, `flistxattr`, `fremovexattr`, `fsetxattr`, `getxattr`, `lgetxattr`, `listxattr`, `llistxattr`, `lremovexattr`, `lsetxattr`, `removexattr`, `setxattr` |
+| `space_control` | `fallocate` |
+
 对于 `fstat`、`fsync`、`ftruncate`、`fgetxattr` 等依赖 fd→path 映射的 syscall，tracer 会在内部继续追踪必要的 `open` / `close` / `dup` / `fcntl` 等维护 syscall，但日志中只输出 `--syscalls` 选择的业务 syscall。
 
 ## 5. 推荐 smoke test
