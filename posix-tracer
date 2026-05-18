@@ -320,7 +320,9 @@ def _syscall_profile(syscall: str) -> tuple[int, int, int, int, int, int, int, i
         return (no_arg, no_arg, 0, no_arg, no_arg, no_arg, no_arg, no_arg, no_arg)
     if syscall in {"fstat", "fsync", "fdatasync", "syncfs", "close", "dup"}:
         return (no_arg, no_arg, 0, no_arg, no_arg, no_arg, no_arg, no_arg, no_arg)
-    if syscall in {"fchmod", "flock", "fcntl"}:
+    if syscall == "fchmod":
+        return (no_arg, no_arg, 0, no_arg, 1, no_arg, no_arg, no_arg, no_arg)
+    if syscall in {"flock", "fcntl"}:
         return (no_arg, no_arg, 0, 1, no_arg, no_arg, no_arg, no_arg, no_arg)
     if syscall == "fchown":
         return (no_arg, no_arg, 0, no_arg, no_arg, no_arg, no_arg, no_arg, no_arg)
@@ -817,7 +819,7 @@ class TracerRuntime:
         if fd_idx >= 0 and not (record.matched_mask & 4):
             parts.append(f"fd={record.fd}")
         if flags_idx >= 0:
-            name = "cmd" if syscall == "fcntl" else "flags"
+            name = "cmd" if syscall == "fcntl" else "op" if syscall == "flock" else "flags"
             parts.append(f"{name}={record.flags}")
         if mode_idx >= 0:
             parts.append(f"mode={record.mode:o}")

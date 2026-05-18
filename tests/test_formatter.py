@@ -98,6 +98,8 @@ class FormatterTest(unittest.TestCase):
             ("truncate", "size=0", None),
             ("lseek", "offset=0", None),
             ("fcntl", "cmd=0", None),
+            ("flock", "op=0", None),
+            ("fchmod", "mode=0", None),
         ]
         for syscall, expected_arg, extra_expected_arg in cases:
             with self.subTest(syscall=syscall):
@@ -107,6 +109,48 @@ class FormatterTest(unittest.TestCase):
                 self.assertIn(expected_arg, text)
                 if extra_expected_arg is not None:
                     self.assertIn(extra_expected_arg, text)
+
+    def test_fchmod_formats_second_arg_as_octal_mode(self):
+        runtime = tracer.TracerRuntime(self.make_config())
+        record = SimpleNamespace(
+            matched_mask=4,
+            fd=5,
+            dirfd=-1,
+            flags=0,
+            mode=0o600,
+            size=0,
+            offset=0,
+            request=0,
+            path1=b"/mnt/objstore/a\0",
+            path2=b"\0",
+        )
+
+        text = runtime._format_args_text("fchmod", record)
+
+        self.assertIn("fd=5</mnt/objstore/a>", text)
+        self.assertIn("mode=600", text)
+        self.assertNotIn("flags=", text)
+
+    def test_flock_formats_second_arg_as_operation(self):
+        runtime = tracer.TracerRuntime(self.make_config())
+        record = SimpleNamespace(
+            matched_mask=4,
+            fd=5,
+            dirfd=-1,
+            flags=2,
+            mode=0,
+            size=0,
+            offset=0,
+            request=0,
+            path1=b"/mnt/objstore/a\0",
+            path2=b"\0",
+        )
+
+        text = runtime._format_args_text("flock", record)
+
+        self.assertIn("fd=5</mnt/objstore/a>", text)
+        self.assertIn("op=2", text)
+        self.assertNotIn("flags=", text)
 
     def test_runtime_decodes_bpf_record_into_trace_event(self):
         runtime = tracer.TracerRuntime(self.make_config())
