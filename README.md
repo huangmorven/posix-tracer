@@ -160,7 +160,11 @@ sudo python3 posix-tracer -d /mnt/objstore
 - 输出到 stdout。
 - 一直运行，直到 Ctrl-C。
 
-注意：目标目录路径会写入 BPF 程序用于内核侧前缀匹配，UTF-8 编码长度必须小于 256 bytes。若 `--dir` 指向符号链接，匹配使用用户传入路径的绝对路径，日志 header 中的 `target_dir_realpath` 仅用于辅助识别真实目录。
+注意：目标目录路径会写入 BPF 程序用于内核侧前缀匹配，UTF-8 编码长度必须小于 256 bytes。当前实现的 `target_dir` 匹配策略是**字面绝对路径前缀匹配**，不会把事件路径解析成 realpath 后再比较。如果目标目录或 workload 访问路径包含符号链接，trace 结果可能漏报或误报；日志 header 中的 `target_dir_realpath` 仅用于辅助识别真实目录。为减少歧义，建议直接传入真实路径，例如：
+
+```bash
+sudo python3 posix-tracer -d "$(readlink -f /mnt/objstore)"
+```
 
 ### 4.2 追踪 60 秒并写入文件
 
@@ -243,6 +247,8 @@ cat /tmp/trace.log
 # posix-tracer started_at=...
 # target_dir=...
 # target_dir_realpath=...
+# target_match=literal absolute path prefix
+# target_match_warning=symlinked target directories or access paths can cause missed or ambiguous events; pass the realpath, for example readlink -f <dir>, to reduce ambiguity
 # kernel=...
 # bcc_version=...
 # mode=exit-only

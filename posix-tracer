@@ -227,6 +227,8 @@ def format_header(
         f"# posix-tracer started_at={started_at}",
         f"# target_dir={config.target_dir}",
         f"# target_dir_realpath={config.target_dir_realpath}",
+        "# target_match=literal absolute path prefix",
+        "# target_match_warning=symlinked target directories or access paths can cause missed or ambiguous events; pass the realpath, for example readlink -f <dir>, to reduce ambiguity",
         f"# kernel={kernel}",
         f"# bcc_version={bcc_version}",
         "# mode=exit-only",

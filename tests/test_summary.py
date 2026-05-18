@@ -38,6 +38,8 @@ class SummaryTest(unittest.TestCase):
         expected_parts = [
             "# target_dir=/mnt/objstore",
             "# target_dir_realpath=/mnt/objstore",
+            "# target_match=literal absolute path prefix",
+            "# target_match_warning=symlinked target directories or access paths can cause missed or ambiguous events",
             "# kernel=5.15.0-test",
             "# bcc_version=0.30.0",
             "# mode=exit-only",
