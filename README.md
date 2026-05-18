@@ -158,7 +158,7 @@ sudo python3 posix-tracer -d /mnt/objstore
 
 - 追踪 `/mnt/objstore` 目录下的 POSIX metadata/control syscall。
 - 输出到 stdout。
-- 一直运行，直到 Ctrl-C。
+- 一直运行，直到 Ctrl-C 或收到 SIGTERM。
 
 注意：目标目录路径会写入 BPF 程序用于内核侧前缀匹配，UTF-8 编码长度必须小于 256 bytes。当前实现的 `target_dir` 匹配策略是**字面绝对路径前缀匹配**，不会把事件路径解析成 realpath 后再比较。如果目标目录或 workload 访问路径包含符号链接，trace 结果可能漏报或误报；日志 header 中的 `target_dir_realpath` 仅用于辅助识别真实目录。为减少歧义，建议直接传入真实路径，例如：
 
@@ -225,6 +225,22 @@ sudo python3 posix-tracer \
 
 启用后，`getxattr`、`setxattr`、`removexattr` 及对应 `l*` / `f*` 形式会尝试输出 `name=...`。该字段使用 256 字节缓冲区，超过缓冲区的 xattr name 会被内核侧字符串读取截断。
 
+### 4.6 限制输出的 syscall 范围
+
+默认情况下，tracer 会输出内置支持的全部 POSIX metadata/control 类业务 syscall。可以用 `--syscalls` 指定只输出其中一部分：
+
+```bash
+sudo python3 posix-tracer \
+  -d /mnt/objstore \
+  -o trace.log \
+  -t 60 \
+  --syscalls openat,fstat,getxattr
+```
+
+`--syscalls` 使用逗号分隔 syscall 名称。每个名称必须属于默认支持的业务 syscall 集合；例如 `read`、`write`、`close` 不属于业务输出范围，会被拒绝。重复项会自动去重，空项会被视为用户输入错误。
+
+对于 `fstat`、`fsync`、`ftruncate`、`fgetxattr` 等依赖 fd→path 映射的 syscall，tracer 会在内部继续追踪必要的 `open` / `close` / `dup` / `fcntl` 等维护 syscall，但日志中只输出 `--syscalls` 选择的业务 syscall。
+
 ## 5. 推荐 smoke test
 
 在 Linux + root + BCC 环境中执行。
@@ -265,6 +281,7 @@ cat /tmp/trace.log
 # target_match_warning=symlinked target directories or access paths can cause missed or ambiguous events; pass the realpath, for example readlink -f <dir>, to reduce ambiguity
 # capture_xattr_name=false
 # xattr_name_buffer_bytes=0
+# selected_syscalls=default
 # kernel=...
 # bcc_version=...
 # mode=exit-only
@@ -288,9 +305,9 @@ cat /tmp/trace.log
 
 | 退出码 | 含义 |
 | --- | --- |
-| `0` | 正常结束，包括 duration 到期、Ctrl-C、存在 syscall 失败事件、存在 lost events。 |
+| `0` | 正常结束，包括 duration 到期、Ctrl-C、SIGTERM、存在 syscall 失败事件、存在 lost events。 |
 | `1` | 运行时错误，例如 BCC 不可用、BPF 加载失败、无可用 tracepoint。 |
-| `2` | 用户输入错误，例如缺少 `--dir`、目标目录不存在、目标路径不是目录、输出文件无法打开。 |
+| `2` | 用户输入错误，例如缺少 `--dir`、目标目录不存在、目标路径不是目录、输出文件无法打开、`--syscalls` 包含不支持的 syscall。 |
 
 ## 7. 常见问题
 
@@ -330,16 +347,6 @@ print("ok")
 PY
 ```
 
-### 7.3 非 Linux 环境能做什么？
-
-当前 macOS/Darwin 环境只能运行纯 Python 测试：
-
-```bash
-python3 -m unittest discover -s tests -v
-```
-
-不能运行真实 eBPF 追踪。
-
 ## 8. 当前实现状态说明
 
 当前代码已经具备：
@@ -350,6 +357,7 @@ python3 -m unittest discover -s tests -v
 - fd 映射模型
 - 日志格式化
 - summary
+- syscall 输出范围选择与参数校验
 - tracepoint 探测
 - BCC runtime 生命周期管理
 - eBPF entry/exit tracepoint 参数采集
@@ -357,6 +365,7 @@ python3 -m unittest discover -s tests -v
 - eBPF fd map 维护，覆盖 open 成功建表、close 删除、dup/fcntl duplicate 复制
 - perf buffer 事件上报与 lost event 统计
 - Python 侧 perf event 解码、事件行写入与 summary 统计
+- SIGINT / SIGTERM 正常停止与 summary flush
 - Linux 集成测试
 
 当前实现优先覆盖 MVP 的通用采集链路和 smoke test 关键 syscall。参数格式化采用通用字段输出，尚未对每个 syscall family 做完整的 flags 名称、人类可读 errno 名称、复杂结构体展开或 openat2 `open_how` 细节解析。
@@ -366,5 +375,3 @@ python3 -m unittest discover -s tests -v
 ```bash
 sudo python3 -m unittest tests.test_integration_linux -v
 ```
-
-非 Linux 环境只能验证纯 Python 逻辑；集成测试会被显式跳过。
