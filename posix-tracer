@@ -182,23 +182,29 @@ def format_latency(latency_ns: int) -> str:
     return f"{max(0, latency_ns) // 1000}us"
 
 
-def _monotonic_to_epoch_ns(timestamp_ns: int) -> int:
-    return timestamp_ns + time.time_ns() - time.monotonic_ns()
+def _clock_offset_ns() -> int:
+    return time.time_ns() - time.monotonic_ns()
 
 
-def _format_time(timestamp_ns: int) -> str:
-    seconds = _monotonic_to_epoch_ns(timestamp_ns) / 1_000_000_000
+def _monotonic_to_epoch_ns(timestamp_ns: int, clock_offset_ns: int | None = None) -> int:
+    if clock_offset_ns is None:
+        clock_offset_ns = _clock_offset_ns()
+    return timestamp_ns + clock_offset_ns
+
+
+def _format_time(timestamp_ns: int, clock_offset_ns: int | None = None) -> str:
+    seconds = _monotonic_to_epoch_ns(timestamp_ns, clock_offset_ns) / 1_000_000_000
     return datetime.fromtimestamp(seconds, tz=timezone.utc).strftime("%H:%M:%S.%f")
 
 
-def format_event_line(event: TraceEvent, compact: bool = False) -> str:
+def format_event_line(event: TraceEvent, compact: bool = False, clock_offset_ns: int | None = None) -> str:
     result = f"{event.syscall}({event.args_text}) = {event.ret}"
     if event.ret < 0 and event.errno is not None:
         result += f" (errno={event.errno})"
     if compact:
         return result
     prefix = (
-        f"[{_format_time(event.timestamp_ns)} pid={event.pid} comm={event.comm} "
+        f"[{_format_time(event.timestamp_ns, clock_offset_ns)} pid={event.pid} comm={event.comm} "
         f"latency={format_latency(event.latency_ns)} matched={event.matched}]"
     )
     return f"{prefix} {result}"
@@ -822,6 +828,7 @@ class TracerRuntime:
         self._writer: OutputWriter | None = None
         self._events_tables = []
         self._syscall_names_by_id: dict[int, str] = {}
+        self._clock_offset_ns: int | None = None
 
     def _import_bpf(self):
         try:
@@ -935,7 +942,13 @@ class TracerRuntime:
         if event is None:
             return
         self.summary.record_event(event)
-        self._writer.write_line(format_event_line(event, compact=self.config.compact))
+        self._writer.write_line(
+            format_event_line(
+                event,
+                compact=self.config.compact,
+                clock_offset_ns=self._clock_offset_ns,
+            )
+        )
 
     def _request_stop(self, signum, frame) -> None:
         del signum, frame
@@ -953,6 +966,7 @@ class TracerRuntime:
                     open_key_fds.pop(key, None)
 
     def run(self) -> int:
+        self._clock_offset_ns = _clock_offset_ns()
         all_syscalls = sorted(BUSINESS_SYSCALLS | FD_MAINTENANCE_SYSCALLS)
         enabled, skipped = discover_tracepoints(all_syscalls)
         if not enabled:

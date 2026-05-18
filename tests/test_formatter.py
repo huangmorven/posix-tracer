@@ -272,6 +272,25 @@ class FormatterTest(unittest.TestCase):
         self.assertIn("name='security.selinux'", runtime._writer.lines[0])
         self.assertIn("size=255", runtime._writer.lines[0])
 
+    def test_handle_event_formats_time_with_cached_clock_offset(self):
+        runtime = tracer.TracerRuntime(self.make_config())
+        runtime._clock_offset_ns = 90_000_000_000
+        runtime._syscall_names_by_id = {1: "getxattr"}
+        runtime._writer = FakeWriter()
+        record = self.make_ctypes_record(
+            tracer.PerfEventRecord,
+            timestamp_ns=5_000_000_000,
+            syscall_id=1,
+            size=255,
+            path1=b"/mnt/objstore/a\0",
+        )
+
+        with patch.object(tracer.time, "time_ns", side_effect=AssertionError("clock offset was not cached")):
+            runtime._handle_event(0, tracer.ctypes.pointer(record), tracer.ctypes.sizeof(record))
+
+        self.assertEqual(len(runtime._writer.lines), 1)
+        self.assertTrue(runtime._writer.lines[0].startswith("[00:01:35.000000 "), msg=runtime._writer.lines[0])
+
     def make_ctypes_record(self, record_type, **overrides):
         record = record_type()
         values = {
