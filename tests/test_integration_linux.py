@@ -1,6 +1,7 @@
 from contextlib import contextmanager
 import os
 import platform
+import signal
 import subprocess
 import sys
 import tempfile
@@ -24,6 +25,18 @@ class LinuxIntegrationTest(unittest.TestCase):
     XATTR_NAME = "user.posix_tracer_key"
 
     def run_tracer_with_workload(self, target_dir, output_path, workload, duration="2", extra_args=None):
+        proc = self.start_tracer(target_dir, output_path, duration=duration, extra_args=extra_args)
+        try:
+            workload()
+        except Exception:
+            proc.terminate()
+            proc.communicate(timeout=5)
+            raise
+        stdout, stderr = proc.communicate(timeout=8)
+        self.assertEqual(proc.returncode, 0, msg=f"stdout={stdout}\nstderr={stderr}")
+        return output_path.read_text()
+
+    def start_tracer(self, target_dir, output_path, duration="2", extra_args=None):
         project_root = Path(__file__).resolve().parents[1]
         tracer_script = project_root / "posix-tracer"
         command = [
@@ -53,15 +66,7 @@ class LinuxIntegrationTest(unittest.TestCase):
             proc.terminate()
             stdout, stderr = proc.communicate(timeout=5)
             self.fail(f"tracer did not become ready\nstdout={stdout}\nstderr={stderr}")
-        try:
-            workload()
-        except Exception:
-            proc.terminate()
-            proc.communicate(timeout=5)
-            raise
-        stdout, stderr = proc.communicate(timeout=8)
-        self.assertEqual(proc.returncode, 0, msg=f"stdout={stdout}\nstderr={stderr}")
-        return output_path.read_text()
+        return proc
 
     def event_lines(self, log_text):
         return [line for line in log_text.splitlines() if line and not line.startswith("#")]
@@ -180,6 +185,22 @@ class LinuxIntegrationTest(unittest.TestCase):
             event_lines = self.event_lines(log_text)
             self.assertTrue(any(str(target_dir / "inside") in line for line in event_lines), msg=log_text)
             self.assertFalse(any(str(sibling_dir / "outside") in line for line in event_lines), msg=log_text)
+
+    def test_tracer_flushes_summary_after_sigterm(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target_dir = Path(tmpdir, "target")
+            target_dir.mkdir()
+            output_path = Path(tmpdir, "trace.log")
+
+            proc = self.start_tracer(target_dir, output_path, duration="30")
+            proc.send_signal(signal.SIGTERM)
+            stdout, stderr = proc.communicate(timeout=8)
+
+            self.assertEqual(proc.returncode, 0, msg=f"stdout={stdout}\nstderr={stderr}")
+            log_text = output_path.read_text()
+            self.assertIn("# tracing_ready=true", log_text)
+            self.assertIn("# summary:", log_text)
+            self.assertIn("# total_events=", log_text)
 
     def test_tracer_captures_xattr_workload_without_name_by_default(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -1020,8 +1020,10 @@ class TracerRuntime:
                 self._events_tables.append(events_table)
             writer.write_line("# tracing_ready=true")
             writer.flush()
-            old_handler = signal.getsignal(signal.SIGINT)
+            old_sigint_handler = signal.getsignal(signal.SIGINT)
+            old_sigterm_handler = signal.getsignal(signal.SIGTERM)
             signal.signal(signal.SIGINT, self._request_stop)
+            signal.signal(signal.SIGTERM, self._request_stop)
             deadline = None
             if self.config.duration_sec is not None:
                 deadline = time.monotonic() + self.config.duration_sec
@@ -1034,12 +1036,14 @@ class TracerRuntime:
             except KeyboardInterrupt:
                 self._stop = True
             finally:
-                signal.signal(signal.SIGINT, old_handler)
+                signal.signal(signal.SIGINT, old_sigint_handler)
+                signal.signal(signal.SIGTERM, old_sigterm_handler)
 
             summary_text = format_summary(self.summary)
             print(summary_text, file=self.stderr)
             if self.config.output_path is not None:
                 writer.write_line(summary_text)
+            writer.flush()
             return 0
         finally:
             self._writer = None
