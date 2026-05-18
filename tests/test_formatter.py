@@ -365,6 +365,7 @@ class FormatterTest(unittest.TestCase):
             follow=False,
             compact=False,
             capture_xattr_name=capture_xattr_name,
+            syscall_names=None,
         )
 
 

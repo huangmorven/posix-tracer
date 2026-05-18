@@ -51,6 +51,27 @@ class SyscallCatalogTest(unittest.TestCase):
                 else:
                     self.assertNotIn(syscall, fd_group)
 
+    def test_filtered_event_syscalls_include_fd_helpers_without_emitting_them(self):
+        trace_syscalls = tracer.syscalls_to_trace_for_events({"fstat"})
+
+        self.assertIn("fstat", trace_syscalls)
+        self.assertTrue(tracer.FD_PRODUCER_SYSCALLS.issubset(trace_syscalls))
+        self.assertTrue(tracer.FD_MAINTENANCE_SYSCALLS.issubset(trace_syscalls))
+
+        source = tracer.build_bpf_source(
+            "/mnt/objstore",
+            ["openat", "fstat", "close"],
+            event_syscalls={"fstat"},
+        )
+
+        self.assertIn("trace_exit_openat", source)
+        self.assertIn("handle_exit(ctx, 1, 0, 1, 0)", source)
+        self.assertIn("handle_exit(ctx, 2, 1, 0, 0)", source)
+        self.assertIn("handle_exit(ctx, 3, 0, 0, 1)", source)
+
+    def test_path_only_filtered_syscalls_do_not_add_fd_helpers(self):
+        self.assertEqual(tracer.syscalls_to_trace_for_events({"statx"}), {"statx"})
+
     def test_build_bpf_source_contains_required_sections(self):
         source = tracer.build_bpf_source("/mnt/objstore", ["openat", "statx"])
         self.assertIsInstance(source, str)

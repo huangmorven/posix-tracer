@@ -51,6 +51,7 @@ class TracerConfig:
     follow: bool
     compact: bool
     capture_xattr_name: bool
+    syscall_names: tuple[str, ...] | None
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -65,7 +66,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="capture and render xattr name arguments using a 256-byte per-event buffer",
     )
+    parser.add_argument(
+        "--syscalls",
+        help="comma-separated syscall names to emit; each name must be one of the default supported business syscalls",
+    )
     return parser.parse_args(argv)
+
+
+def parse_syscall_filter(value: str | None) -> tuple[str, ...] | None:
+    if value is None:
+        return None
+    names = [name.strip() for name in value.split(",")]
+    if any(not name for name in names):
+        raise UserError("--syscalls must be a comma-separated list of non-empty syscall names")
+    unknown = sorted(set(names) - BUSINESS_SYSCALLS)
+    if unknown:
+        supported = ",".join(sorted(BUSINESS_SYSCALLS))
+        raise UserError(
+            f"unsupported syscall(s) for --syscalls: {','.join(unknown)}; "
+            f"supported syscalls: {supported}"
+        )
+    return tuple(sorted(set(names)))
 
 
 def build_config(args: argparse.Namespace) -> TracerConfig:
@@ -86,6 +107,7 @@ def build_config(args: argparse.Namespace) -> TracerConfig:
         follow=args.follow,
         compact=args.compact,
         capture_xattr_name=args.capture_xattr_name,
+        syscall_names=parse_syscall_filter(args.syscalls),
     )
 
 
@@ -253,6 +275,7 @@ def format_header(
         "# target_match_warning=symlinked target directories or access paths can cause missed or ambiguous events; pass the realpath, for example readlink -f <dir>, to reduce ambiguity",
         f"# capture_xattr_name={'true' if config.capture_xattr_name else 'false'}",
         f"# xattr_name_buffer_bytes={MAX_XATTR_NAME_LEN if config.capture_xattr_name else 0}",
+        f"# selected_syscalls={','.join(config.syscall_names) if config.syscall_names is not None else 'default'}",
         f"# kernel={kernel}",
         f"# bcc_version={bcc_version}",
         "# mode=exit-only",
@@ -410,7 +433,10 @@ def build_bpf_source(
     enabled_syscalls: list[str],
     syscall_ids: dict[str, int] | None = None,
     capture_xattr_name: bool = False,
+    event_syscalls: set[str] | None = None,
 ) -> str:
+    if event_syscalls is None:
+        event_syscalls = BUSINESS_SYSCALLS
     syscall_comment = ",".join(enabled_syscalls)
     escaped_target = _escape_c_string(target_dir)
     target_len = len(target_dir.encode("utf-8"))
@@ -424,7 +450,7 @@ def build_bpf_source(
         safe_name = syscall.replace("-", "_")
         p1, p2, fd, flags, mode, size, offset, request, dirfd = _syscall_profile(syscall)
         xattr_name_idx = _xattr_name_idx(syscall) if capture_xattr_name else -1
-        is_business = 1 if syscall in BUSINESS_SYSCALLS else 0
+        is_business = 1 if syscall in event_syscalls else 0
         is_producer = 1 if syscall in FD_PRODUCER_SYSCALLS else 0
         maint_kind = _maintenance_kind(syscall)
         probe_functions.append(
@@ -781,6 +807,14 @@ def group_syscalls_for_bpf(enabled_syscalls: list[str], path_chunk_size: int = 8
     return groups
 
 
+def syscalls_to_trace_for_events(event_syscalls: set[str]) -> set[str]:
+    syscalls = set(event_syscalls)
+    if any(_uses_fd_map(syscall) for syscall in event_syscalls):
+        syscalls.update(FD_PRODUCER_SYSCALLS)
+        syscalls.update(FD_MAINTENANCE_SYSCALLS)
+    return syscalls
+
+
 class OutputWriter:
     def __init__(self, output_path: str | None, follow: bool, stdout=None) -> None:
         self._stdout = stdout if stdout is not None else sys.stdout
@@ -979,10 +1013,12 @@ class TracerRuntime:
 
     def run(self) -> int:
         self._clock_offset_ns = _clock_offset_ns()
-        all_syscalls = sorted(BUSINESS_SYSCALLS | FD_MAINTENANCE_SYSCALLS)
+        event_syscalls = set(self.config.syscall_names) if self.config.syscall_names is not None else set(BUSINESS_SYSCALLS)
+        all_syscalls = sorted(syscalls_to_trace_for_events(event_syscalls))
         enabled, skipped = discover_tracepoints(all_syscalls)
-        if not enabled:
-            raise TracerRuntimeError("no usable syscall tracepoints found")
+        enabled_event_syscalls = event_syscalls.intersection(enabled)
+        if not enabled_event_syscalls:
+            raise TracerRuntimeError("no usable selected syscall tracepoints found")
         self._syscall_names_by_id = {
             syscall_id: syscall for syscall_id, syscall in enumerate(enabled, start=1)
         }
@@ -1007,6 +1043,7 @@ class TracerRuntime:
                     syscall_group,
                     syscall_ids=syscall_ids,
                     capture_xattr_name=self.config.capture_xattr_name,
+                    event_syscalls=event_syscalls,
                 )
                 try:
                     bpf = BPF(text=source)

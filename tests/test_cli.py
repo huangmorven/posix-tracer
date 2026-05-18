@@ -22,6 +22,8 @@ class CliTest(unittest.TestCase):
                 "--follow",
                 "--compact",
                 "--capture-xattr-name",
+                "--syscalls",
+                "openat, fstat,openat",
             ])
             config = tracer.build_config(args)
 
@@ -32,6 +34,7 @@ class CliTest(unittest.TestCase):
         self.assertTrue(config.follow)
         self.assertTrue(config.compact)
         self.assertTrue(config.capture_xattr_name)
+        self.assertEqual(config.syscall_names, ("fstat", "openat"))
 
     def test_short_options(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -43,6 +46,21 @@ class CliTest(unittest.TestCase):
         self.assertFalse(config.follow)
         self.assertFalse(config.compact)
         self.assertFalse(config.capture_xattr_name)
+        self.assertIsNone(config.syscall_names)
+
+    def test_syscall_filter_rejects_unsupported_syscalls(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            args = tracer.parse_args(["--dir", tmpdir, "--syscalls", "openat,read,close"])
+
+            with self.assertRaisesRegex(tracer.UserError, "unsupported syscall"):
+                tracer.build_config(args)
+
+    def test_syscall_filter_rejects_empty_entries(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            args = tracer.parse_args(["--dir", tmpdir, "--syscalls", "openat,,fstat"])
+
+            with self.assertRaisesRegex(tracer.UserError, "non-empty syscall"):
+                tracer.build_config(args)
 
     def test_missing_target_directory_raises_user_error(self):
         args = tracer.parse_args(["--dir", "/path/that/does/not/exist"])

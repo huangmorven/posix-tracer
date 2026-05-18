@@ -13,6 +13,7 @@ class SummaryTest(unittest.TestCase):
             follow=False,
             compact=compact,
             capture_xattr_name=False,
+            syscall_names=None,
         )
 
     def make_event(self, syscall="openat", ret=0, errno_value=None):
@@ -43,6 +44,7 @@ class SummaryTest(unittest.TestCase):
             "# target_match_warning=symlinked target directories or access paths can cause missed or ambiguous events",
             "# capture_xattr_name=false",
             "# xattr_name_buffer_bytes=0",
+            "# selected_syscalls=default",
             "# kernel=5.15.0-test",
             "# bcc_version=0.30.0",
             "# mode=exit-only",
@@ -64,6 +66,7 @@ class SummaryTest(unittest.TestCase):
             follow=False,
             compact=False,
             capture_xattr_name=True,
+            syscall_names=("getxattr", "setxattr"),
         )
 
         header = tracer.format_header(
@@ -75,6 +78,7 @@ class SummaryTest(unittest.TestCase):
 
         self.assertIn("# capture_xattr_name=true", header)
         self.assertIn("# xattr_name_buffer_bytes=256", header)
+        self.assertIn("# selected_syscalls=getxattr,setxattr", header)
 
     def test_summary_counts_events_failures_lost_syscalls_and_errno(self):
         summary = tracer.Summary()
